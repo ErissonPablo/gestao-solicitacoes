@@ -1,0 +1,9 @@
+data/*.xls
+data/*.xlsx
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
+config/paths.yaml
+.venv/
+# scripts de validacao/dev local (usam caminhos da maquina)
+_*.py

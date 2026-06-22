@@ -1,0 +1,23 @@
+# Copie para config/paths.yaml e ajuste.
+
+# Fonte "Pasta local": a ferramenta le TODOS os .xls/.xlsx da pasta e
+# identifica cada arquivo pelo conteudo (nao pelo nome). Pode apontar para
+# uma pasta sincronizada do SharePoint (OneDrive) ou qualquer pasta de rede.
+pasta_local: "C:\\Users\\erisson.sousa\\Downloads"
+
+# Fonte "SharePoint": le os arquivos direto da pasta online.
+sharepoint:
+  site_url: "https://lactosulgo.sharepoint.com/sites/grp.compras"
+  # caminho server-relative da pasta (a partir de /sites/...):
+  pasta: "/sites/grp.compras/Documentos Compartilhados/1 - Planilhas diárias/1 - CONTROLE DE SOLICITAÇÃO DE COMPRAS"
+
+# Credenciais ficam em .streamlit/secrets.toml (NAO neste arquivo). Use UMA opcao:
+#   # 1) App registrado no Azure AD (recomendado p/ rodar sempre-online):
+#   sp_client_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+#   sp_client_secret = "..."
+#   # 2) Usuario/senha (so funciona se o tenant permitir login sem MFA):
+#   sp_username = "voce@lactosul.com.br"
+#   sp_password = "..."
+#   # 3) Login interativo no navegador (precisa de um client_id que o tenant aceite):
+#   sp_tenant = "lactosulgo.onmicrosoft.com"
+#   sp_client_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
