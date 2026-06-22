@@ -59,6 +59,26 @@ Abre em `http://localhost:8501`. Na barra lateral, escolha a fonte:
 - **SharePoint** — lê a planilha de distribuição direto do SharePoint
   (rmatr029/rmatr052 continuam por upload). Veja "SharePoint" abaixo.
 
+## Deploy na nuvem (Streamlit Community Cloud)
+
+Roda sempre-online e acessivel por link, de graca, sem mexer no firewall nem
+depender de um PC ligado. Os dados entram pelo modo **Upload** (a nuvem nao
+enxerga pastas locais nem o SharePoint sem credencial de app).
+
+1. **Crie um repositorio PRIVADO** no GitHub (ex.: `gestao-solicitacoes`), vazio.
+2. **Envie o codigo** (na pasta do projeto):
+   ```bat
+   git remote add origin https://github.com/SEU_USUARIO/gestao-solicitacoes.git
+   git push -u origin main
+   ```
+3. Acesse **https://share.streamlit.io** → *New app* → escolha o repositorio,
+   branch `main`, arquivo `app.py` → *Deploy*.
+4. Em **Settings → Sharing**, deixe **"Only specific people"** e convide os
+   e-mails da equipe (o app fica privado, so quem voce liberar acessa).
+
+O `requirements.txt` ja esta pronto; o Streamlit Cloud instala tudo sozinho.
+Nunca suba os arquivos de dados nem `secrets.toml` (o `.gitignore` ja bloqueia).
+
 ## SharePoint (opcional)
 
 1. `pip install Office365-REST-Python-Client`
