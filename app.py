@@ -293,26 +293,41 @@ with tab3:
 # --------------------------------------------------------------------------- #
 with tab4:
     st.subheader("Pedidos com entrega pendente")
-    st.caption("Itens de pedido nao encerrados com saldo a receber (QTD > entregue).")
-    pcols = st.columns(3)
+    st.caption(
+        "Itens nao encerrados com saldo a receber. "
+        "**Cinza (eliminado por residuo) nao entra** - e saldo cancelado, como se o pedido tivesse sido excluido."
+    )
+    pcols = st.columns(4)
     comp_opts = sorted([c for c in pend["comprador"].dropna().unique()])
     f_comp = pcols[0].multiselect("Comprador", comp_opts, key="ent_comp")
     min_idade = pcols[1].slider("Idade minima (dias)", 0, int(pend["dias_em_aberto"].max() or 0), 0)
     forn_busca = pcols[2].text_input("Fornecedor contem", key="ent_forn")
+    ocultar_prenota = pcols[3].checkbox(
+        "Ocultar o que ja chegou (pre nota)", key="ent_prenota",
+        help="Pre nota (laranja) = ja chegou na fabrica, falta so lancar a nota fiscal.",
+    )
     p = pend.copy()
     if f_comp:
         p = p[p["comprador"].isin(f_comp)]
     p = p[p["dias_em_aberto"] >= min_idade]
     if forn_busca:
         p = p[p["FORNECEDOR"].str.contains(forn_busca, case=False, na=False)]
+    if ocultar_prenota:
+        p = p[~p["chegou_fabrica"]]
     p = p.sort_values("dias_em_aberto", ascending=False)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Itens pendentes", len(p))
+    m2.metric("Ja chegaram (pre nota)", int(p["chegou_fabrica"].sum()))
+    m3.metric("Aguardando chegada", int((~p["chegou_fabrica"]).sum()))
+
     st.write(f"**{len(p)}** itens em **{p['PEDIDO COMPRA'].nunique()}** pedidos")
     show = p[["PEDIDO COMPRA", "EMISSAO", "comprador", "FORNECEDOR", "PRODUTO",
               "DESCRICAO.", "QUANTIDADE", "QUANT ENTREG", "saldo", "dias_em_aberto",
-              "Legenda"]].copy()
+              "situacao_label"]].copy()
     show["EMISSAO"] = br_data(show["EMISSAO"])
     show = show.rename(columns={"comprador": "COMPRADOR", "dias_em_aberto": "DIAS",
-                                "DESCRICAO.": "DESCRICAO"})
+                                "DESCRICAO.": "DESCRICAO", "situacao_label": "SITUACAO"})
     st.dataframe(show, width="stretch", hide_index=True)
     baixar_csv(show, "entregas_pendentes.csv", "⬇️ Baixar entregas (CSV)")
     st.bar_chart(p.groupby("comprador").size())
@@ -357,9 +372,12 @@ with tab5:
 # --------------------------------------------------------------------------- #
 with tab6:
     st.subheader("Qualidade dos dados")
-    brutos = dist["RESPONSAVEL"].astype(str).str.strip()
+    resp_col = dist["RESPONSAVEL"]
+    if isinstance(resp_col, pd.DataFrame):  # cabecalho duplicado: usa a 1a coluna
+        resp_col = resp_col.iloc[:, 0]
+    brutos = resp_col.astype(str).str.strip()
     nao_rec = sorted({b for b in brutos
-                      if nz.norm_comprador(b) is None and b and b.lower() != "none"})
+                      if nz.norm_comprador(b) is None and b and str(b).lower() != "none"})
     cqa, cqb = st.columns(2)
     cqa.metric("Grafias distintas em RESPONSAVEL", brutos.nunique())
     cqb.metric("Valores nao reconhecidos (lixo)", len(nao_rec))

@@ -144,13 +144,59 @@ def build_sc_model(
 
 
 # --------------------------------------------------------------------------- #
+# Situacao da entrega (coluna "Legenda" do rmatr052)
+# --------------------------------------------------------------------------- #
+def situacao_entrega(legenda) -> str:
+    """Traduz a 'Legenda' (cor) do rmatr052 numa situacao tratavel."""
+    s = nz.strip_accents(str(legenda)).upper()
+    if "ELIMINAD" in s and "RESIDUO" in s:
+        return "eliminado_residuo"   # saldo cancelado: nao e pendencia
+    if "PRE NOTA" in s:
+        return "pre_nota"            # ja chegou na fabrica, aguardando nota
+    if "RECEBIDO PARCIAL" in s:
+        return "recebido_parcial"
+    if "RECEBIDO" in s:
+        return "recebido"
+    if "LIBERAD" in s:
+        return "liberado"
+    if "APROVACAO" in s:
+        return "em_aprovacao"
+    if "REJEITAD" in s:
+        return "rejeitado"
+    return "outro"
+
+
+SITUACAO_LABEL = {
+    "pre_nota": "Chegou na fabrica (pre nota)",
+    "recebido_parcial": "Recebido parcial",
+    "liberado": "Liberado - aguardando",
+    "em_aprovacao": "Em aprovacao",
+    "rejeitado": "Rejeitado",
+    "recebido": "Recebido",
+    "eliminado_residuo": "Eliminado por residuo",
+    "outro": "Outro",
+}
+
+
+# --------------------------------------------------------------------------- #
 # Pendencias de entrega (nivel item de pedido)
 # --------------------------------------------------------------------------- #
 def pendencias_entrega(pcs: pd.DataFrame, hoje=None) -> pd.DataFrame:
     p = pcs.copy()
     p["saldo"] = (p["QUANTIDADE"] - p["QUANT ENTREG"]).clip(lower=0)
     p["comprador"] = p["COMPRADOR"].map(nz.norm_comprador)
-    pend = p[(p["saldo"] > 1e-9) & (p["ENCERRADO"] != "E")].copy()
+    legenda = p["Legenda"] if "Legenda" in p.columns else ""
+    p["situacao"] = (
+        legenda.map(situacao_entrega) if hasattr(legenda, "map") else "outro"
+    )
+    p["situacao_label"] = p["situacao"].map(SITUACAO_LABEL).fillna("Outro")
+    # ja chegou fisicamente na fabrica (pre nota = laranja)
+    p["chegou_fabrica"] = p["situacao"].eq("pre_nota")
+    pend = p[
+        (p["saldo"] > 1e-9)
+        & (p["ENCERRADO"] != "E")
+        & (p["situacao"] != "eliminado_residuo")  # cinza = cancelado, nao conta
+    ].copy()
     hoje = pd.Timestamp(hoje) if hoje is not None else pd.Timestamp.today().normalize()
     pend["dias_em_aberto"] = (hoje - pend["EMISSAO"]).dt.days
     return pend
