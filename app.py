@@ -376,8 +376,13 @@ with tab6:
     if isinstance(resp_col, pd.DataFrame):  # cabecalho duplicado: usa a 1a coluna
         resp_col = resp_col.iloc[:, 0]
     brutos = resp_col.astype(str).str.strip()
-    nao_rec = sorted({b for b in brutos
-                      if nz.norm_comprador(b) is None and b and str(b).lower() != "none"})
+    _descartar = {"", "none", "nan", "nat", "<na>"}
+    # forca str + key=str.lower: impossivel dar TypeError mesmo com dado misto
+    nao_rec = sorted(
+        {str(b).strip() for b in brutos
+         if nz.norm_comprador(b) is None and str(b).strip().lower() not in _descartar},
+        key=str.lower,
+    )
     cqa, cqb = st.columns(2)
     cqa.metric("Grafias distintas em RESPONSAVEL", brutos.nunique())
     cqb.metric("Valores nao reconhecidos (lixo)", len(nao_rec))
