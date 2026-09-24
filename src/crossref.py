@@ -105,10 +105,16 @@ def build_sc_model(
 
     # Colapsa rateio: 1 linha por SC-item. Soma qtd/valor; conta rateios.
     s["_pedido_norm"] = s["PEDIDO"].astype(str).str.strip()
+    # Datas opcionais (nem toda extracao do rmatr029 traz essas colunas)
+    for origem in ("DT.LIBERACAO", "DT.EMIS.PC"):
+        if origem not in s.columns:
+            s[origem] = pd.NaT
     agg = (
         s.sort_values("DT.EMISSAO")
         .groupby("chave")
         .agg(
+            DT_LIBERACAO=("DT.LIBERACAO", "first"),
+            DT_EMIS_PC=("DT.EMIS.PC", "first"),
             FILIAL=("FILIAL", "first"),
             tipo_cod=("tipo_cod", "first"),
             TIPO=("TIPO", "first"),

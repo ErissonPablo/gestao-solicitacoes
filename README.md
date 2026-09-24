@@ -30,13 +30,66 @@ pedido e se o pedido foi entregue.
 
 ## Telas
 
-1. **Backlog a atender** — SCs aprovadas ainda sem pedido, mais antigas no topo.
-2. **Sem distribuição** — SCs na demanda que não aparecem na planilha de
+No topo: **6 cards de KPI** (SC-itens, backlog em R$, necessidade vencida,
+sem dono e sem pedido, tempo SC → pedido, entregas pendentes).
+
+0. **Visão geral** — funil (SC → distribuída → pedido → entregue),
+   envelhecimento do backlog por faixa de dias, entrada × atendimento por mês,
+   carteira por comprador e departamentos com mais SCs paradas.
+1. **Alertas** — lista de ação do dia: sem dono e sem pedido, necessidade
+   vencida, urgência ALTA parada há N dias, entregas com mais de 30 dias.
+2. **Backlog a atender** — SCs aprovadas ainda sem pedido, em **cartões**
+   (estilo sistema), mais antigas no topo. Em cada SC:
+   - **✅ Atendida** — marca que a SC já foi tratada (fica verde, com quem
+     marcou e quando);
+   - **📍 Onde encontrar** — fornecedor/local onde comprar; os nomes já usados
+     aparecem como sugestão.
+   Filtros por situação (pendentes/atendidas), por local, busca, urgentes e
+   vencidas; **Agrupar por local** separa a lista pelos nomes de "Onde encontrar".
+   "Ver como tabela" volta ao formato planilha.
+3. **Sem distribuição** — SCs na demanda que não aparecem na planilha de
    distribuição (risco de "SC perdida"). Críticas = sem dono **e** sem pedido.
-3. **Carga por comprador** — distribuição por responsável, com % ainda sem pedido.
-4. **Entregas pendentes** — itens de pedido não encerrados com saldo a receber.
-5. **Visão 360 por SC** — busca uma SC e mostra distribuição → pedido → entrega.
-6. **Qualidade de dados** — grafias não reconhecidas e checagem de rateio.
+4. **Compradores** — carga, % pendente, vencidas, backlog em R$ e tempo
+   mediano SC → pedido por comprador (com gráfico de dispersão).
+5. **Entregas pendentes** — itens de pedido não encerrados com saldo a receber.
+6. **Visão 360 por SC** — busca uma SC e mostra distribuição → pedido → entrega.
+7. **Qualidade de dados** — grafias não reconhecidas e checagem de rateio.
+
+**Filtro global de comprador** na barra lateral e **relatório Excel** com
+todas as visões (respeitando os filtros) no botão "Baixar relatório Excel".
+
+### Indicadores novos
+
+- **Necessidade vencida:** SC-item sem pedido cujo `DT.NECESSIDADE` já passou.
+- **Tempo SC → pedido:** `DT.EMIS.PC` − `DT.LIBERACAO` (ou `DT.EMISSAO` se não
+  houver liberação), em dias corridos. Precisa da coluna `DT.EMIS.PC` no rmatr029.
+
+### Onde ficam salvas as marcações (Atendida / Onde encontrar)
+
+Ficam salvas **por SC-item** (ex.: `052507-0008`), então continuam valendo
+quando você sobe as planilhas de novo. Escolha seu nome em **👤 Você é** na
+barra lateral para registrar quem marcou.
+
+- **Padrão:** arquivo `data/acompanhamento.db` na pasta do projeto. Serve
+  quando o app roda sempre no mesmo PC (`run.bat` / `run-rede.bat`).
+- **Equipe toda / Streamlit Cloud (recomendado):** Supabase.
+  1. Rode `sql/acompanhamento.sql` no SQL Editor do Supabase.
+  2. Em `.streamlit/secrets.toml` (ou em *Settings → Secrets* no Streamlit Cloud):
+     ```toml
+     supabase_url = "https://SEU-PROJETO.supabase.co"
+     supabase_key = "chave service_role"
+     ```
+  Com isso o app passa a gravar no Supabase sozinho. A barra lateral mostra
+  onde as marcações estão sendo salvas.
+
+> No Streamlit Cloud **sem** Supabase as marcações se perdem quando o app
+> reinicia.
+
+### Modo demonstração
+
+Na barra lateral, **Demonstração (dados fictícios)** abre a ferramenta com
+dados inventados (`src/demo.py`), nos mesmos formatos do Protheus. Serve para
+mostrar a ferramenta e testar mudanças de layout sem os arquivos reais.
 
 ## Como rodar
 
@@ -98,7 +151,7 @@ use para conferir a confiabilidade após qualquer mudança.
 ## Estrutura
 
 ```
-app.py              # interface Streamlit (6 telas)
+app.py              # interface Streamlit (8 telas)
 reconcile.py        # validação das contagens
 src/
   loaders.py        # leitura dos 3 formatos
@@ -106,4 +159,11 @@ src/
   crossref.py       # cruzamento SC × distribuição × pedido
   datasource.py     # upload / pasta local / detecção por nome
   sharepoint.py     # leitura opcional do SharePoint
+  metrics.py        # indicadores do painel (funil, aging, tempo SC->pedido...)
+  ui.py             # visual: CSS, cards de KPI, estilo dos graficos
+  export.py         # relatorio Excel
+  demo.py           # dados ficticios para o modo demonstracao
+  store.py          # marcacoes Atendida / Onde encontrar (SQLite ou Supabase)
+sql/
+  acompanhamento.sql  # tabela para o Supabase
 ```

@@ -7,3 +7,4 @@ config/paths.yaml
 .venv/
 # scripts de validacao/dev local (usam caminhos da maquina)
 _*.py
+data/*.db

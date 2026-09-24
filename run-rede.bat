@@ -2,7 +2,7 @@
 REM Sobe a ferramenta para acesso na REDE LOCAL (porta fixa 8520).
 REM Deixe esta janela aberta enquanto os colegas estiverem usando.
 cd /d "%~dp0"
-where streamlit >nul 2>nul || python -m pip install -r requirements.txt
+python -m pip install -q -r requirements.txt
 
 echo ============================================================
 echo  Gestao de Solicitacoes de Compra - acesso pela rede local
