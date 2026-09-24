@@ -32,25 +32,63 @@ ui.aplicar_css()
 # --------------------------------------------------------------------------- #
 # Loaders cacheados (chave = bytes do arquivo)
 # --------------------------------------------------------------------------- #
-@st.cache_data(show_spinner="Lendo Solicitacoes (rmatr029)...")
-def _load_scs(b: bytes) -> pd.DataFrame:
-    return loaders.load_scs(io.BytesIO(b))
-
-
-@st.cache_data(show_spinner="Lendo Pedidos (rmatr052)...")
-def _load_pcs(b: bytes) -> pd.DataFrame:
-    return loaders.load_pcs(io.BytesIO(b))
-
-
-@st.cache_data(show_spinner="Lendo planilha de distribuicao...")
-def _load_dist(b: bytes) -> pd.DataFrame:
-    return loaders.load_distribuicao(io.BytesIO(b))
-
-
 @st.cache_data(show_spinner="Gerando dados de demonstracao...")
 def _demo() -> dict:
+    import os
+
     from src import demo
-    return demo.gerar()
+    return demo.gerar(n_scs=int(os.environ.get("GSC_DEMO_N", "260")))
+
+
+@st.cache_data(show_spinner="Identificando os arquivos...", max_entries=5)
+def _resolver(itens: tuple) -> dict:
+    """Cacheado: so reclassifica quando os arquivos mudam."""
+    cands = [{"nome": n, "bytes": b, "head": h, "path": p, "mtime": m}
+             for n, b, h, p, m in itens]
+    return ds.resolver(cands)
+
+
+def _chaves_candidatos(cands: list) -> tuple:
+    return tuple((c.get("nome"), c.get("bytes"), c.get("head"), c.get("path"),
+                  c.get("mtime")) for c in cands)
+
+
+@st.cache_data(show_spinner="Lendo a pasta...", max_entries=5)
+def _candidatos_pasta(pasta: str, assinatura: tuple) -> list:
+    """Cacheado pela assinatura (nome, tamanho, data) dos arquivos da pasta."""
+    return ds.candidatos_da_pasta(pasta)
+
+
+def _assinatura_pasta(pasta: str) -> tuple:
+    itens = []
+    for p in Path(pasta).iterdir():
+        if p.suffix.lower() in (".xls", ".xlsx", ".xml") and not p.name.startswith("~$"):
+            try:
+                s = p.stat()
+                itens.append((p.name, s.st_size, s.st_mtime))
+            except OSError:
+                continue
+    return tuple(sorted(itens))
+
+
+@st.cache_data(show_spinner="Cruzando SCs, distribuicao e pedidos...", max_entries=3)
+def _processar(sc_b: bytes, pc_b: bytes, dist_b: bytes, hoje_iso: str) -> dict:
+    """Todo o processamento pesado, feito 1 vez por conjunto de arquivos/dia."""
+    scs_ = loaders.load_scs(io.BytesIO(sc_b))
+    pcs_ = loaders.load_pcs(io.BytesIO(pc_b))
+    dist_ = loaders.load_distribuicao(io.BytesIO(dist_b))
+    hoje_ = pd.Timestamp(hoje_iso)
+    resp_col = dist_["RESPONSAVEL"]
+    if isinstance(resp_col, pd.DataFrame):  # cabecalho duplicado: usa a 1a coluna
+        resp_col = resp_col.iloc[:, 0]
+    return {
+        "model": mt.enriquecer(crossref.build_sc_model(scs_, dist_), hoje_),
+        "pend": crossref.pendencias_entrega(pcs_, hoje_),
+        "ped_agg": crossref.agrega_pedidos(pcs_),
+        "resp_brutos": resp_col.astype(str).str.strip(),
+        "n_linhas_sc": len(scs_),
+        "n_chaves_sc": len({nz.chave_sc(n, i) for n, i in zip(scs_["NUM.SC"], scs_["ITEM"])}),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -105,7 +143,7 @@ elif fonte == "Pasta local":
         value=str(Path.home() / "Downloads"),
     )
     if pasta and Path(pasta).is_dir():
-        candidatos = ds.candidatos_da_pasta(pasta)
+        candidatos = _candidatos_pasta(pasta, _assinatura_pasta(pasta))
     else:
         st.sidebar.warning("Informe uma pasta valida.")
 
@@ -126,7 +164,7 @@ else:  # Demonstracao
 
 # Identificacao por conteudo + escolha da extracao mais recente (sem duplicar)
 if candidatos:
-    resolvido = ds.resolver(candidatos)
+    resolvido = _resolver(_chaves_candidatos(candidatos))
     sc_bytes, pc_bytes, dist_bytes = resolvido["sc"], resolvido["pc"], resolvido["dist"]
     rotulos = {"sc": "Solicitacoes (rmatr029)", "pc": "Pedidos (rmatr052)",
                "dist": "Distribuicao"}
@@ -159,14 +197,11 @@ if not (sc_bytes and pc_bytes and dist_bytes):
 # --------------------------------------------------------------------------- #
 # Carrega e cruza
 # --------------------------------------------------------------------------- #
-scs = _load_scs(sc_bytes)
-pcs = _load_pcs(pc_bytes)
-dist = _load_dist(dist_bytes)
-
 hoje = pd.Timestamp.today().normalize()
-model = mt.enriquecer(crossref.build_sc_model(scs, dist), hoje)
-pend_all = crossref.pendencias_entrega(pcs)
-ped_agg = crossref.agrega_pedidos(pcs)
+_proc = _processar(sc_bytes, pc_bytes, dist_bytes, hoje.isoformat())
+model = _proc["model"]
+pend_all = _proc["pend"]
+ped_agg = _proc["ped_agg"]
 
 # --------------------------------------------------------------------------- #
 # Acompanhamento manual (Atendida / Onde encontrar) - salvo por SC-item
@@ -193,8 +228,8 @@ except Exception as e:  # noqa: BLE001
     st.sidebar.error(f"Nao consegui ler as marcacoes ({store.nome}): {e}")
     acomp = st_store._vazio()
 
-model = model.merge(acomp[["chave", "atendida", "atendida_por", "atendida_em",
-                           "onde_encontrar"]], on="chave", how="left")
+COLS_ACOMP = ["chave", "atendida", "atendida_por", "atendida_em", "onde_encontrar"]
+model = model.merge(acomp[COLS_ACOMP], on="chave", how="left")
 model["atendida"] = model["atendida"].fillna(False).astype(bool)
 
 EQUIPE_USUARIOS = sorted(nz.EQUIPE_ATUAL | nz.IMPLANTADORES)
@@ -237,6 +272,7 @@ if comp_sel:
     mf = mf[mf["responsavel"].isin(comp_sel)]
     pend = pend_all[pend_all["comprador"].isin(comp_sel)]
 
+mf_base = mf.drop(columns=COLS_ACOMP[1:])  # sem as marcacoes (o fragmento reaplica)
 backlog = mf[~mf["com_pedido"]]
 sem_dist = mf[~mf["distribuida"]]
 perdidas = mf[(~mf["com_pedido"]) & (~mf["distribuida"])]
@@ -277,7 +313,7 @@ ui.kpis([
      "sub": f"<b>{ui.num(pend['chegou_fabrica'].sum())}</b> ja chegaram (pre nota)"},
 ])
 
-tabs = st.tabs([
+tabs = st.tabs(on_change="rerun", key="aba", tabs=[
     "📊 Visao geral",
     "🚨 Alertas",
     "📋 Backlog a atender",
@@ -327,7 +363,8 @@ def tabela_sc(df: pd.DataFrame, extra: list | None = None, altura: int | None = 
 # --------------------------------------------------------------------------- #
 # Visao geral
 # --------------------------------------------------------------------------- #
-with tab_geral:
+@st.fragment
+def _aba_geral():
     g1, g2 = st.columns([5, 4], gap="medium")
     with g1, st.container(border=True):
         ui.secao("Funil da solicitacao",
@@ -410,10 +447,16 @@ with tab_geral:
         fig.update_xaxes(visible=False, range=[0, max(dp["qtd"].max() if len(dp) else 1, 1) * 1.18])
         ui.grafico(fig)
 
+
+if tab_geral.open:
+    with tab_geral:
+        _aba_geral()
+
 # --------------------------------------------------------------------------- #
 # Alertas
 # --------------------------------------------------------------------------- #
-with tab_alertas:
+@st.fragment
+def _aba_alertas():
     ui.secao("O que precisa de atencao hoje",
              "Lista de acao: comece de cima para baixo.")
     dias_urg = st.slider("Considerar urgencia ALTA parada a partir de (dias)", 1, 30, 5)
@@ -459,15 +502,29 @@ with tab_alertas:
                 "dias_em_aberto": "DIAS", "situacao_label": "SITUACAO"}),
                 width="stretch", hide_index=True)
 
+
+if tab_alertas.open:
+    with tab_alertas:
+        _aba_alertas()
+
 # --------------------------------------------------------------------------- #
 # Tab 1 - Backlog
 # --------------------------------------------------------------------------- #
-with tab1:
+@st.fragment
+def _aba_backlog():
     ui.secao("SCs aprovadas ainda sem pedido",
              "Marque o que ja foi atendido e anote onde encontrar cada produto. "
              "As marcacoes ficam salvas por SC-item e continuam valendo nas proximas "
              "subidas das planilhas.")
-    locais = sorted(acomp["onde_encontrar"].dropna().unique().tolist())
+    # Recarrega as marcacoes: dentro do fragmento so esta aba roda de novo
+    try:
+        acomp_f = store.carregar()
+    except Exception:  # noqa: BLE001
+        acomp_f = acomp
+    backlog = mf_base[~mf_base["com_pedido"]].merge(
+        acomp_f[COLS_ACOMP], on="chave", how="left")
+    backlog["atendida"] = backlog["atendida"].fillna(False).astype(bool)
+    locais = sorted(acomp_f["onde_encontrar"].dropna().unique().tolist())
 
     f1, f2, f3 = st.columns([3, 3, 3])
     resp_opts = sorted([r for r in backlog["responsavel"].dropna().unique()])
@@ -621,10 +678,16 @@ with tab1:
     baixar_csv(b[COLS_SC + ["atendida", "atendida_por", "onde_encontrar"]],
                "backlog_a_atender.csv", "⬇️ Baixar lista (CSV)")
 
+
+if tab1.open:
+    with tab1:
+        _aba_backlog()
+
 # --------------------------------------------------------------------------- #
 # Tab 2 - Sem distribuicao
 # --------------------------------------------------------------------------- #
-with tab2:
+@st.fragment
+def _aba_sem_dist():
     ui.secao("SCs sem registro de distribuicao",
              "Estao na demanda do Protheus mas nao aparecem na planilha de distribuicao - "
              "risco classico de 'SC perdida'. As sem pedido sao as mais criticas.")
@@ -640,10 +703,16 @@ with tab2:
                   "Atendidas direto - vale registrar para manter o historico.")
         tabela_sc(com_ped)
 
+
+if tab2.open:
+    with tab2:
+        _aba_sem_dist()
+
 # --------------------------------------------------------------------------- #
 # Tab 3 - Compradores
 # --------------------------------------------------------------------------- #
-with tab3:
+@st.fragment
+def _aba_compradores():
     ui.secao("Desempenho e carga por comprador",
              "SC-itens distribuidos no filtro. Tempo SC → pedido em dias corridos "
              "(da liberacao ate a emissao do pedido).")
@@ -694,10 +763,16 @@ with tab3:
     st.caption("Equipe atual: " + ", ".join(sorted(nz.EQUIPE_ATUAL)) +
                " | Eduardo = aprendiz (implanta pedidos, fora das metricas de carga).")
 
+
+if tab3.open:
+    with tab3:
+        _aba_compradores()
+
 # --------------------------------------------------------------------------- #
 # Tab 4 - Entregas pendentes
 # --------------------------------------------------------------------------- #
-with tab4:
+@st.fragment
+def _aba_entregas():
     ui.secao("Pedidos com entrega pendente",
              "Itens nao encerrados com saldo a receber. Cinza (eliminado por residuo) "
              "nao entra - e saldo cancelado.")
@@ -768,10 +843,16 @@ with tab4:
         fig.update_xaxes(visible=False, range=[0, max(pc_s.max() if len(pc_s) else 1, 1) * 1.2])
         ui.grafico(fig)
 
+
+if tab4.open:
+    with tab4:
+        _aba_entregas()
+
 # --------------------------------------------------------------------------- #
 # Tab 5 - Visao 360 por SC
 # --------------------------------------------------------------------------- #
-with tab5:
+@st.fragment
+def _aba_360():
     ui.secao("Rastreio completo de uma SC", "Distribuicao → pedido → entrega.")
     num = st.text_input("Numero da SC (ex.: 052507)").strip()
     if num:
@@ -809,15 +890,18 @@ with tab5:
                         c.warning("Ainda sem pedido" + (" · **necessidade vencida**"
                                                         if r["vencida"] else ""))
 
+
+if tab5.open:
+    with tab5:
+        _aba_360()
+
 # --------------------------------------------------------------------------- #
 # Tab 6 - Qualidade de dados
 # --------------------------------------------------------------------------- #
-with tab6:
+@st.fragment
+def _aba_qualidade():
     ui.secao("Qualidade dos dados")
-    resp_col = dist["RESPONSAVEL"]
-    if isinstance(resp_col, pd.DataFrame):  # cabecalho duplicado: usa a 1a coluna
-        resp_col = resp_col.iloc[:, 0]
-    brutos = resp_col.astype(str).str.strip()
+    brutos = _proc["resp_brutos"]
     _descartar = {"", "none", "nan", "nat", "<na>"}
     # forca str + key=str.lower: impossivel dar TypeError mesmo com dado misto
     nao_rec = sorted(
@@ -836,12 +920,15 @@ with tab6:
     st.write("Valores ignorados como lixo na planilha de distribuicao:")
     st.write(", ".join(f"`{v}`" for v in nao_rec) or "nenhum")
     st.divider()
-    rateio = scs.copy()
-    rateio["chave"] = [nz.chave_sc(n, i) for n, i in zip(rateio["NUM.SC"], rateio["ITEM"])]
     st.caption(
-        f"rmatr029: {len(scs)} linhas -> {rateio['chave'].nunique()} SC-itens unicos "
+        f"rmatr029: {_proc['n_linhas_sc']} linhas -> {_proc['n_chaves_sc']} SC-itens unicos "
         f"(diferenca = rateio por centro de custo, tratado automaticamente)."
     )
+
+
+if tab6.open:
+    with tab6:
+        _aba_qualidade()
 
 # --------------------------------------------------------------------------- #
 # Relatorio Excel (sidebar)
@@ -862,25 +949,44 @@ def _sc_excel(df):
         "atendida_por": "ATENDIDA POR", "onde_encontrar": "ONDE ENCONTRAR"})
 
 
-abas_xlsx = {
-    "Resumo": pd.DataFrame({
-        "Indicador": ["SC-itens no filtro", "Backlog sem pedido", "Backlog R$",
-                      "Necessidade vencida", "Sem dono e sem pedido",
-                      "Tempo mediano SC-pedido (dias)", "Entregas pendentes"],
-        "Valor": [len(mf), len(backlog), round(backlog["VALOR"].sum(), 2), len(vencidas),
-                  len(perdidas), lt["mediana"], len(pend)],
-    }),
-    "Backlog": _sc_excel(backlog.sort_values("idade_dias", ascending=False)),
-    "Vencidas": _sc_excel(vencidas.sort_values("dias_atraso", ascending=False)),
-    "Sem distribuicao": _sc_excel(sem_dist),
-    "Compradores": carga.rename(columns={"responsavel": "COMPRADOR"}),
-    "Entregas pendentes": show,
-}
-st.sidebar.download_button(
-    "📥 Baixar relatorio Excel",
-    export.relatorio_excel(abas_xlsx),
-    file_name=f"gestao_sc_{hoje.strftime('%Y-%m-%d')}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    help="Todas as visoes (com os filtros atuais) em um unico arquivo.",
-    width="stretch",
-)
+def _montar_excel() -> bytes:
+    carga_x = mt.carga_comprador(mf)
+    ent = pend.sort_values("dias_em_aberto", ascending=False)[
+        ["PEDIDO COMPRA", "EMISSAO", "comprador", "FORNECEDOR", "PRODUTO", "DESCRICAO.",
+         "QUANTIDADE", "QUANT ENTREG", "saldo", "dias_em_aberto", "situacao_label"]
+    ].rename(columns={"comprador": "COMPRADOR", "dias_em_aberto": "DIAS",
+                      "DESCRICAO.": "DESCRICAO", "situacao_label": "SITUACAO",
+                      "saldo": "SALDO"})
+    abas_xlsx = {
+        "Resumo": pd.DataFrame({
+            "Indicador": ["SC-itens no filtro", "Backlog sem pedido", "Backlog R$",
+                          "Necessidade vencida", "Sem dono e sem pedido",
+                          "Tempo mediano SC-pedido (dias)", "Entregas pendentes"],
+            "Valor": [len(mf), len(backlog), round(backlog["VALOR"].sum(), 2),
+                      len(vencidas), len(perdidas), lt["mediana"], len(pend)],
+        }),
+        "Backlog": _sc_excel(backlog.sort_values("idade_dias", ascending=False)),
+        "Vencidas": _sc_excel(vencidas.sort_values("dias_atraso", ascending=False)),
+        "Sem distribuicao": _sc_excel(sem_dist),
+        "Compradores": carga_x.rename(columns={"responsavel": "COMPRADOR"}),
+        "Entregas pendentes": ent,
+    }
+    return export.relatorio_excel(abas_xlsx)
+
+
+# O Excel so e montado quando alguem pede (montar a cada clique deixava o app lento)
+_chave_xlsx = (tuple(ano_sel), tuple(tipos_sel), so_aprovadas, tuple(comp_sel),
+               len(sc_bytes), len(pc_bytes), len(dist_bytes), hoje.isoformat())
+_xlsx = st.session_state.get("_xlsx")
+if _xlsx and _xlsx[0] == _chave_xlsx:
+    st.sidebar.download_button(
+        "📥 Baixar relatorio Excel", _xlsx[1],
+        file_name=f"gestao_sc_{hoje.strftime('%Y-%m-%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        width="stretch", type="primary", on_click="ignore",
+    )
+elif st.sidebar.button("📊 Gerar relatorio Excel", width="stretch",
+                       help="Todas as visoes (com os filtros atuais) em um unico arquivo."):
+    with st.spinner("Montando o Excel..."):
+        st.session_state["_xlsx"] = (_chave_xlsx, _montar_excel())
+    st.rerun()
