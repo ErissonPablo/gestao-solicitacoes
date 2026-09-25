@@ -703,24 +703,46 @@ def _aba_backlog():
                 st.session_state["bl_pagina"] = 1
             pag = min(max(1, st.session_state.get("bl_pagina", 1)), n_pag)
 
-            def _ir(delta: int):
-                st.session_state["bl_pagina"] = min(max(1, pag + delta), n_pag)
+            def _ir_para(nova: int):
+                st.session_state["bl_pagina"] = min(max(1, int(nova)), n_pag)
+                st.session_state["_bl_rolar"] = True  # volta ao topo da lista
 
             def paginacao(pos: str):
                 if n_pag <= 1:
                     st.caption(f"{len(b)} SC-itens · {ordem_sel.lower()} primeiro")
                     return
-                c1, c2, c3 = st.columns([2, 6, 2], vertical_alignment="center")
-                c1.button("◀ Anterior", key=f"pg_ant_{pos}", disabled=pag <= 1,
-                          on_click=_ir, args=(-1,), width="stretch")
+                c1, c2, c3, c4 = st.columns([2, 4, 2, 2], vertical_alignment="center")
+                if c1.button("◀ Anterior", key=f"pg_ant_{pos}", disabled=pag <= 1,
+                             width="stretch"):
+                    _ir_para(pag - 1)
+                    st.rerun(scope="fragment")
                 c2.markdown(
                     f"<div style='text-align:center;color:#52514e'>Pagina <b>{pag}</b> de "
                     f"<b>{n_pag}</b> · SC-itens {(pag - 1) * POR_PAGINA + 1}-"
-                    f"{min(len(b), pag * POR_PAGINA)} de {len(b)} · "
-                    f"{ordem_sel.lower()} primeiro</div>", unsafe_allow_html=True)
-                c3.button("Proxima ▶", key=f"pg_prox_{pos}", disabled=pag >= n_pag,
-                          on_click=_ir, args=(1,), width="stretch")
+                    f"{min(len(b), pag * POR_PAGINA)} de {len(b)}</div>",
+                    unsafe_allow_html=True)
+                escolha = c3.selectbox(
+                    "Ir para a pagina", list(range(1, n_pag + 1)), index=pag - 1,
+                    key=f"pg_sel_{pos}_{pag}_{n_pag}", label_visibility="collapsed",
+                    format_func=lambda x: f"Pagina {x}")
+                if escolha != pag:
+                    _ir_para(escolha)
+                    st.rerun(scope="fragment")
+                if c4.button("Proxima ▶", key=f"pg_prox_{pos}", disabled=pag >= n_pag,
+                             width="stretch", type="primary"):
+                    _ir_para(pag + 1)
+                    st.rerun(scope="fragment")
 
+            st.markdown('<div id="topo-lista"></div>', unsafe_allow_html=True)
+            if st.session_state.pop("_bl_rolar", False):
+                import streamlit.components.v1 as _comp
+                st.session_state["_bl_rolar_n"] = st.session_state.get("_bl_rolar_n", 0) + 1
+                _comp.html(
+                    f"<!-- {st.session_state['_bl_rolar_n']} -->"
+                    "<script>const d=window.parent.document;"
+                    "setTimeout(()=>{const e=d.getElementById('topo-lista');"
+                    "if(e){e.scrollIntoView({behavior:'smooth',block:'start'});}},150);</script>",
+                    height=0)
             paginacao("topo")
             for _, r in b.iloc[(pag - 1) * POR_PAGINA: pag * POR_PAGINA].iterrows():
                 cartao(r)
