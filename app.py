@@ -40,8 +40,13 @@ def _demo() -> dict:
     return demo.gerar(n_scs=int(os.environ.get("GSC_DEMO_N", "260")))
 
 
+# Mudou a regra de leitura/cruzamento? Troque a versao: invalida o cache antigo
+# (o cache do Streamlit so enxerga o codigo da propria funcao, nao o de src/).
+VERSAO_MOTOR = "2026-09-25"
+
+
 @st.cache_data(show_spinner="Identificando os arquivos...", max_entries=5)
-def _resolver(itens: tuple) -> dict:
+def _resolver(itens: tuple, versao: str = VERSAO_MOTOR) -> dict:
     """Cacheado: so reclassifica quando os arquivos mudam."""
     cands = [{"nome": n, "bytes": b, "head": h, "path": p, "mtime": m}
              for n, b, h, p, m in itens]
@@ -72,7 +77,8 @@ def _assinatura_pasta(pasta: str) -> tuple:
 
 
 @st.cache_data(show_spinner="Cruzando SCs, distribuicao e pedidos...", max_entries=3)
-def _processar(sc_b: bytes, pc_b: bytes, dist_b: bytes, hoje_iso: str) -> dict:
+def _processar(sc_b: bytes, pc_b: bytes, dist_b: bytes, hoje_iso: str,
+               versao: str = VERSAO_MOTOR) -> dict:
     """Todo o processamento pesado, feito 1 vez por conjunto de arquivos/dia."""
     scs_ = loaders.load_scs(io.BytesIO(sc_b))
     pcs_ = loaders.load_pcs(io.BytesIO(pc_b))
@@ -164,7 +170,7 @@ else:  # Demonstracao
 
 # Identificacao por conteudo + escolha da extracao mais recente (sem duplicar)
 if candidatos:
-    resolvido = _resolver(_chaves_candidatos(candidatos))
+    resolvido = _resolver(_chaves_candidatos(candidatos), VERSAO_MOTOR)
     sc_bytes, pc_bytes, dist_bytes = resolvido["sc"], resolvido["pc"], resolvido["dist"]
     rotulos = {"sc": "Solicitacoes (rmatr029)", "pc": "Pedidos (rmatr052)",
                "dist": "Distribuicao"}
@@ -210,7 +216,7 @@ if not (sc_bytes and pc_bytes and dist_bytes):
 # Carrega e cruza
 # --------------------------------------------------------------------------- #
 hoje = pd.Timestamp.today().normalize()
-_proc = _processar(sc_bytes, pc_bytes, dist_bytes, hoje.isoformat())
+_proc = _processar(sc_bytes, pc_bytes, dist_bytes, hoje.isoformat(), VERSAO_MOTOR)
 model = _proc["model"]
 pend_all = _proc["pend"]
 ped_agg = _proc["ped_agg"]
@@ -570,7 +576,18 @@ def _aba_backlog():
         alvo_txt = (b["DESCRICAO"].astype(str) + " " + b["NUM.SC"].astype(str) + " "
                     + b["SOLICITANTE"].astype(str))
         b = b[alvo_txt.str.contains(f_busca, case=False, na=False, regex=False)]
-    b = b.sort_values("idade_dias", ascending=False)
+    ORDENS = {
+        "Mais recentes": (["DT_EMISSAO", "NUM.SC", "ITEM"], [False, False, True]),
+        "Mais antigas": (["DT_EMISSAO", "NUM.SC", "ITEM"], [True, True, True]),
+        "Necessidade": (["DT_NECESSIDADE", "NUM.SC", "ITEM"], [True, True, True]),
+        "Maior valor": (["VALOR"], [False]),
+    }
+    o1, o2 = st.columns([6, 4], vertical_alignment="bottom")
+    ordem_sel = o1.segmented_control("Ordenar por", list(ORDENS), default="Mais recentes",
+                                     key="bl_ordem") or "Mais recentes"
+    ver_tabela = o2.toggle("Ver como tabela (planilha)", key="bl_tabela")
+    cols_o, asc_o = ORDENS[ordem_sel]
+    b = b.sort_values(cols_o, ascending=asc_o, na_position="last")
 
     n_at = int(b["atendida"].sum())
     ui.kpis([
@@ -656,7 +673,6 @@ def _aba_backlog():
                 placeholder="Digite ou escolha...", on_change=_salvar, args=(chave, "onde"),
                 label_visibility="collapsed")
 
-    ver_tabela = st.toggle("Ver como tabela (planilha)", key="bl_tabela")
     if ver_tabela:
         tabela_sc(b, extra=["atendida", "onde_encontrar"], altura=520)
     elif b.empty:
@@ -679,13 +695,36 @@ def _aba_backlog():
                         st.caption(f"Mostrando 100 de {len(sub)}. Use os filtros.")
         else:
             n_pag = max(1, -(-len(b) // POR_PAGINA))
-            pg_col1, pg_col2 = st.columns([8, 2])
-            pag = pg_col2.number_input("Pagina", 1, n_pag, 1, key="bl_pag") if n_pag > 1 else 1
-            pg_col1.caption(f"Mostrando {min(len(b), (pag - 1) * POR_PAGINA + 1)}-"
-                            f"{min(len(b), pag * POR_PAGINA)} de {len(b)} · "
-                            "mais antigas primeiro")
+            # volta para a pagina 1 quando filtro/ordem mudam
+            assinatura = (tuple(f_resp), tuple(f_onde), f_busca, f_sit, f_urg, f_venc,
+                          ordem_sel, len(b))
+            if st.session_state.get("_bl_assin") != assinatura:
+                st.session_state["_bl_assin"] = assinatura
+                st.session_state["bl_pagina"] = 1
+            pag = min(max(1, st.session_state.get("bl_pagina", 1)), n_pag)
+
+            def _ir(delta: int):
+                st.session_state["bl_pagina"] = min(max(1, pag + delta), n_pag)
+
+            def paginacao(pos: str):
+                if n_pag <= 1:
+                    st.caption(f"{len(b)} SC-itens · {ordem_sel.lower()} primeiro")
+                    return
+                c1, c2, c3 = st.columns([2, 6, 2], vertical_alignment="center")
+                c1.button("◀ Anterior", key=f"pg_ant_{pos}", disabled=pag <= 1,
+                          on_click=_ir, args=(-1,), width="stretch")
+                c2.markdown(
+                    f"<div style='text-align:center;color:#52514e'>Pagina <b>{pag}</b> de "
+                    f"<b>{n_pag}</b> · SC-itens {(pag - 1) * POR_PAGINA + 1}-"
+                    f"{min(len(b), pag * POR_PAGINA)} de {len(b)} · "
+                    f"{ordem_sel.lower()} primeiro</div>", unsafe_allow_html=True)
+                c3.button("Proxima ▶", key=f"pg_prox_{pos}", disabled=pag >= n_pag,
+                          on_click=_ir, args=(1,), width="stretch")
+
+            paginacao("topo")
             for _, r in b.iloc[(pag - 1) * POR_PAGINA: pag * POR_PAGINA].iterrows():
                 cartao(r)
+            paginacao("rodape")
 
     baixar_csv(b[COLS_SC + ["atendida", "atendida_por", "onde_encontrar"]],
                "backlog_a_atender.csv", "⬇️ Baixar lista (CSV)")
