@@ -64,9 +64,76 @@ def classificar(nome: str, b: bytes) -> str | None:
     return None
 
 
+def _ultima_distribuicao(b: bytes) -> float | None:
+    """Maior 'DATA DISTRIBUICAO' da aba base = ate quando a planilha esta atualizada.
+
+    A planilha de distribuicao nao tem data de extracao; sem isto, ao subir a
+    de ontem e a de hoje juntas (upload nao tem data do arquivo), a ferramenta
+    podia ficar com a de ontem e as SCs novas apareciam sem responsavel.
+    """
+    try:
+        import openpyxl
+
+        wb = openpyxl.load_workbook(io.BytesIO(b), read_only=True, data_only=True)
+        base = next((s for s in wb.sheetnames if s.strip().lower() == "base"), None)
+        if base is None:
+            wb.close()
+            return None
+        ws = wb[base]
+        cab = next(ws.iter_rows(max_row=1, values_only=True), ())
+        col = next((i for i, c in enumerate(cab, start=1)
+                    if c and "DISTRIBUI" in _sem_acento_upper(str(c))
+                    and "DATA" in _sem_acento_upper(str(c))), None)
+        wb.close()
+        if not col:
+            return None
+        return _maior_data_coluna(b, base, col)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _maior_data_coluna(b: bytes, aba: str, col: int) -> float | None:
+    """Maior data de uma coluna lendo o XML da aba direto (rapido: ~0,2 s
+    numa base de 40 mil linhas, contra ~2,5 s celula a celula no openpyxl)."""
+    import zipfile
+    from datetime import timedelta
+
+    z = zipfile.ZipFile(io.BytesIO(b))
+    wbxml = z.read("xl/workbook.xml").decode("utf-8", "ignore")
+    rels = z.read("xl/_rels/workbook.xml.rels").decode("utf-8", "ignore")
+    m = re.search(r'<sheet[^>]*name="' + re.escape(aba) + r'"[^>]*r:id="([^"]+)"', wbxml)
+    if not m:
+        return None
+    alvo = re.search(r'<Relationship[^>]*Id="' + re.escape(m.group(1)) +
+                     r'"[^>]*Target="([^"]+)"', rels)
+    if not alvo:
+        alvo = re.search(r'<Relationship[^>]*Target="([^"]+)"[^>]*Id="' +
+                         re.escape(m.group(1)) + r'"', rels)
+    if not alvo:
+        return None
+    caminho = alvo.group(1).lstrip("/")
+    caminho = caminho if caminho.startswith("xl/") else "xl/" + caminho
+    xml = z.read(caminho).decode("utf-8", "ignore")
+    letra = ""
+    n = col
+    while n:
+        n, r = divmod(n - 1, 26)
+        letra = chr(65 + r) + letra
+    serie = re.findall(r'<c r="' + letra + r'\d+"[^>]*>(?:<f[^>]*>.*?</f>|<f[^>]*/>)?<v>([\d.]+)</v>', xml)
+    datas = [float(v) for v in serie if 36526 <= float(v) <= 73051]  # 2000..2099
+    if not datas:
+        return None
+    return (datetime(1899, 12, 30) + timedelta(days=max(datas))).timestamp()
+
+
 def data_referencia(tipo: str, b: bytes, mtime: float | None) -> float:
-    """Timestamp (epoch) para ordenar 'mais recente'. Usa a data interna do
-    relatorio do Protheus (Emissao/Dt.Ref) quando existir; senao, o mtime."""
+    """Timestamp (epoch) para ordenar 'mais recente'. Usa a data interna:
+    Dt.Ref/Emissao do relatorio do Protheus, ou a ultima data de distribuicao
+    da planilha; se nao houver, a data do arquivo (mtime)."""
+    if tipo == "dist" and b[:2] == b"PK":
+        ref = _ultima_distribuicao(b)
+        if ref is not None:
+            return ref
     if tipo in ("sc", "pc"):
         txt = _head_text(b)
         m = re.search(r"(?:EMISSAO|DT\.REF)[:\s]*([0-3]?\d/[0-1]?\d/\d{4})", txt)
@@ -102,23 +169,26 @@ def resolver(candidatos: list[dict]) -> dict:
     (assim nada e contado em dobro).
     """
     baldes: dict[str, list] = {"sc": [], "pc": [], "dist": []}
-    for c in candidatos:
+    for ordem, c in enumerate(candidatos):
         amostra = _bytes_para_classificar(c)
         tipo = classificar(c.get("nome", ""), amostra)
         if tipo:
             ref = data_referencia(tipo, amostra, c.get("mtime"))
-            baldes[tipo].append((ref, c))
+            # desempate (mesma data interna): arquivo mais novo; depois o
+            # ultimo enviado/listado
+            desempate = (c.get("mtime") or 0.0, ordem)
+            baldes[tipo].append((ref, desempate, c))
     saida = {"sc": None, "pc": None, "dist": None, "detalhes": {}}
     for tipo, itens in baldes.items():
         if not itens:
             continue
-        itens.sort(key=lambda x: x[0], reverse=True)
-        ref, escolhido = itens[0]
+        itens.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        ref, _, escolhido = itens[0]
         saida[tipo] = _bytes_completos(escolhido)
         saida["detalhes"][tipo] = {
             "nome": escolhido.get("nome", "?"),
             "ref": datetime.fromtimestamp(ref).strftime("%d/%m/%Y") if ref else "?",
-            "descartados": [c.get("nome", "?") for _, c in itens[1:]],
+            "descartados": [c.get("nome", "?") for _, _, c in itens[1:]],
         }
     return saida
 

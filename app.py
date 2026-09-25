@@ -176,6 +176,18 @@ if candidatos:
             st.sidebar.success(f"✅ {rot}\n\n{det['nome']} · extracao {det['ref']}{extra}")
         else:
             st.sidebar.error(f"❌ {rot}: nao encontrado nos arquivos")
+    # Aviso: distribuicao muito mais antiga que as SCs -> SCs novas sem dono
+    _det = resolvido["detalhes"]
+    try:
+        _d_sc = pd.to_datetime(_det["sc"]["ref"], dayfirst=True)
+        _d_dist = pd.to_datetime(_det["dist"]["ref"], dayfirst=True)
+        if (_d_sc - _d_dist).days > 3:
+            st.sidebar.warning(
+                f"⚠️ A distribuicao vai so ate **{_d_dist:%d/%m}** e as SCs sao de "
+                f"**{_d_sc:%d/%m}**. SCs mais novas vao aparecer sem responsavel. "
+                "Confira se subiu a planilha de distribuicao atualizada.")
+    except (KeyError, ValueError, TypeError):
+        pass
 
 if not (sc_bytes and pc_bytes and dist_bytes):
     ui.hero("Gestao de Solicitacoes de Compra",
