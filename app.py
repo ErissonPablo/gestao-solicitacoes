@@ -237,13 +237,28 @@ ped_agg = _proc["ped_agg"]
 # --------------------------------------------------------------------------- #
 # Acompanhamento manual (Atendida / Onde encontrar) - salvo por SC-item
 # --------------------------------------------------------------------------- #
-@st.cache_resource
-def _store_persistente():
+def _ler_segredos() -> tuple[dict, str | None]:
+    """Secrets do Streamlit (PC: .streamlit/secrets.toml; nuvem: Settings -> Secrets)."""
     try:
-        segredos = dict(st.secrets)
-    except Exception:  # noqa: BLE001 - sem secrets.toml
-        segredos = {}
-    return st_store.criar(segredos, demo=False, raiz=Path(__file__).parent)
+        return {k: st.secrets[k] for k in st.secrets}, None
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        if "pars" in msg.lower():  # arquivo existe mas o TOML tem erro de formato
+            return {}, msg.split(":", 1)[-1].strip()[:200]
+        return {}, None  # sem secrets.toml: tudo bem, usa o arquivo local
+
+
+SEGREDOS, ERRO_SEGREDOS = _ler_segredos()
+# A conexao fica guardada na memoria do servidor; a "assinatura" da configuracao
+# faz o app criar uma nova assim que os Secrets mudam (sem precisar reiniciar).
+import hashlib as _hl  # noqa: E402
+CFG_BANCO = _hl.sha1(f"{SEGREDOS.get('supabase_url', '')}|{SEGREDOS.get('supabase_key', '')}"
+                     .encode()).hexdigest()
+
+
+@st.cache_resource
+def _store_persistente(cfg: str):
+    return st_store.criar(SEGREDOS, demo=False, raiz=Path(__file__).parent)
 
 
 if modo_demo:
@@ -251,7 +266,7 @@ if modo_demo:
         st.session_state["_store_demo"] = st_store.criar(None, demo=True, raiz=Path("."))
     store = st.session_state["_store_demo"]
 else:
-    store = _store_persistente()
+    store = _store_persistente(CFG_BANCO)
 
 try:
     acomp = store.carregar()
@@ -275,15 +290,21 @@ st.sidebar.caption(f"Marcacoes salvas em: {store.nome}")
 # Historico (vida de cada SC) - grava 1x por conjunto de arquivos
 # --------------------------------------------------------------------------- #
 @st.cache_resource
-def _banco_persistente():
-    try:
-        segredos = dict(st.secrets)
-    except Exception:  # noqa: BLE001 - sem secrets.toml
-        segredos = {}
-    return bc.criar(segredos, raiz=Path(__file__).parent)
+def _banco_persistente(cfg: str):
+    return bc.criar(SEGREDOS, raiz=Path(__file__).parent)
 
 
-banco = None if modo_demo else _banco_persistente()
+banco = None if modo_demo else _banco_persistente(CFG_BANCO)
+if not modo_demo:
+    if ERRO_SEGREDOS:
+        st.sidebar.error("❌ Os Secrets tem erro de formato e foram ignorados "
+                         f"(gravando so localmente): {ERRO_SEGREDOS}")
+    elif not (SEGREDOS.get("supabase_url") and SEGREDOS.get("supabase_key")):
+        faltando = [k for k in ("supabase_url", "supabase_key") if not SEGREDOS.get(k)]
+        st.sidebar.warning("⚠️ Banco compartilhado desligado: falta "
+                           + " e ".join(f"`{k}`" for k in faltando)
+                           + " nos Secrets. As marcacoes e o historico estao sendo "
+                           "gravados so neste servidor e podem se perder.")
 # historico inicial: so vai para o banco compartilhado (Supabase), uma unica vez
 if banco is not None and banco.compartilhado and not st.session_state.get("_hist_inicial_ok"):
     try:
