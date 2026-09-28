@@ -8,3 +8,5 @@ config/paths.yaml
 # scripts de validacao/dev local (usam caminhos da maquina)
 _*.py
 data/*.db
+data/*.json
+data/*.importado

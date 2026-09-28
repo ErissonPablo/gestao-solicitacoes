@@ -110,8 +110,9 @@ class SupabaseStore:
         import requests
 
         self._s = requests.Session()
-        self._s.headers.update({"apikey": key, "Authorization": f"Bearer {key}",
-                                "Content-Type": "application/json"})
+        self._s.headers.update({"apikey": key, "Content-Type": "application/json"})
+        if key.startswith("eyJ"):  # chaves antigas (JWT) tambem vao no Authorization
+            self._s.headers["Authorization"] = f"Bearer {key}"
         self._url = url.rstrip("/") + f"/rest/v1/{TABELA}"
 
     def carregar(self) -> pd.DataFrame:

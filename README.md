@@ -85,6 +85,38 @@ barra lateral para registrar quem marcou.
 > No Streamlit Cloud **sem** Supabase as marcações se perdem quando o app
 > reinicia.
 
+### Histórico (banco de dados)
+
+A cada subida das planilhas o app grava, **uma vez por conjunto de arquivos**, a
+foto de cada SC-item e os acontecimentos desde a última subida:
+
+🧾 emitida → 👤 distribuída (quem) → 🔁 redistribuída → 🛒 virou pedido →
+📦 entregue → ✅ saiu do rmatr029 (encerrada) → ↩️ voltou
+
+- Como o rmatr029 sai com "Apenas Pendentes", a SC some quando é atendida. O
+  histórico guarda ela mesmo assim e procura no rmatr052 o pedido que a atendeu
+  (produto + data da SC + quantidade — o rmatr052 não traz o número da SC).
+- Extração **mais antiga** que a última gravada é ignorada (não "volta no tempo").
+- Toda alteração em **Atendida / Onde encontrar** fica registrada (quem, o quê, quando).
+- Telas: aba **📜 Histórico** (indicadores, tempo SC → pedido, acontecimentos) e
+  **linha do tempo** em cada SC na aba **🔎 Visão 360** (inclusive SCs encerradas).
+- `data/historico_inicial.json` (se existir) é importado uma única vez com o
+  banco vazio — usado para carregar extrações antigas.
+
+**Onde fica:** Supabase (projeto *Gestao-compras*), tabelas `carga`, `sc_item`,
+`sc_evento`, `sc_acompanhamento`, `sc_acompanhamento_log` — ver `sql/historico.sql`.
+Sem `supabase_url`/`supabase_key` no `secrets.toml`, usa `data/historico.db` (só no PC).
+
+Configuração (`.streamlit/secrets.toml` no PC, ou *Settings → Secrets* no Streamlit Cloud):
+
+```toml
+supabase_url = "https://guzjsirvnnxxskoefqhy.supabase.co"
+supabase_key = "sb_secret_..."   # Supabase → Project Settings → API Keys → Secret key
+```
+
+A chave **secreta** fica só no servidor do app. As tabelas têm RLS ligado e
+nenhuma regra pública: pela chave publicável ninguém lê nem grava nada.
+
 ### Modo demonstração
 
 Na barra lateral, **Demonstração (dados fictícios)** abre a ferramenta com
@@ -151,7 +183,7 @@ use para conferir a confiabilidade após qualquer mudança.
 ## Estrutura
 
 ```
-app.py              # interface Streamlit (8 telas)
+app.py              # interface Streamlit (9 telas)
 reconcile.py        # validação das contagens
 src/
   loaders.py        # leitura dos 3 formatos
@@ -164,6 +196,9 @@ src/
   export.py         # relatorio Excel
   demo.py           # dados ficticios para o modo demonstracao
   store.py          # marcacoes Atendida / Onde encontrar (SQLite ou Supabase)
+  banco.py          # acesso ao banco (Supabase REST ou SQLite)
+  historico.py      # vida de cada SC: sincronizacao, eventos, importacao inicial
 sql/
-  acompanhamento.sql  # tabela para o Supabase
+  acompanhamento.sql  # tabela das marcacoes (ja incluida no historico.sql)
+  historico.sql       # todas as tabelas do banco
 ```

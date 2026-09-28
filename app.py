@@ -19,6 +19,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).parent))
 from src import loaders, crossref, normalize as nz, datasource as ds  # noqa: E402
 from src import metrics as mt, ui, export, store as st_store  # noqa: E402
+from src import banco as bc, historico as hi  # noqa: E402
 import html as _html  # noqa: E402
 
 st.set_page_config(
@@ -42,7 +43,7 @@ def _demo() -> dict:
 
 # Mudou a regra de leitura/cruzamento? Troque a versao: invalida o cache antigo
 # (o cache do Streamlit so enxerga o codigo da propria funcao, nao o de src/).
-VERSAO_MOTOR = "2026-09-25"
+VERSAO_MOTOR = "2026-09-28"
 
 
 @st.cache_data(show_spinner="Identificando os arquivos...", max_entries=5)
@@ -91,6 +92,11 @@ def _processar(sc_b: bytes, pc_b: bytes, dist_b: bytes, hoje_iso: str,
         "model": mt.enriquecer(crossref.build_sc_model(scs_, dist_), hoje_),
         "pend": crossref.pendencias_entrega(pcs_, hoje_),
         "ped_agg": crossref.agrega_pedidos(pcs_),
+        # itens de pedido (so o necessario) p/ achar o pedido das SCs que sairam
+        "pcs_itens": pcs_[[c for c in ("PEDIDO COMPRA", "EMISSAO", "PRODUTO", "DATA SOLICIT",
+                                       "QUANTIDADE", "QUANT ENTREG", "FORNECEDOR",
+                                       "ENCERRADO", "Legenda", "COMPRADOR")
+                           if c in pcs_.columns]].copy(),
         "resp_brutos": resp_col.astype(str).str.strip(),
         "n_linhas_sc": len(scs_),
         "n_chaves_sc": len({nz.chave_sc(n, i) for n, i in zip(scs_["NUM.SC"], scs_["ITEM"])}),
@@ -182,6 +188,13 @@ if candidatos:
             st.sidebar.success(f"✅ {rot}\n\n{det['nome']} · extracao {det['ref']}{extra}")
         else:
             st.sidebar.error(f"❌ {rot}: nao encontrado nos arquivos")
+    # Datas internas (ISO) para o historico
+    refs_iso = {}
+    for _t, _v in resolvido["detalhes"].items():
+        _dt = pd.to_datetime(_v.get("ref"), dayfirst=True, errors="coerce")
+        if pd.notna(_dt):
+            refs_iso[_t] = _dt.strftime("%Y-%m-%d")
+    st.session_state["_refs_iso"] = refs_iso
     # Aviso: distribuicao muito mais antiga que as SCs -> SCs novas sem dono
     _det = resolvido["detalhes"]
     try:
@@ -256,6 +269,55 @@ usuario = st.sidebar.selectbox(
     "👤 Voce e", EQUIPE_USUARIOS, index=None, placeholder="Escolha seu nome",
     key="usuario", help="Fica registrado quem marcou cada SC como atendida.")
 st.sidebar.caption(f"Marcacoes salvas em: {store.nome}")
+
+
+# --------------------------------------------------------------------------- #
+# Historico (vida de cada SC) - grava 1x por conjunto de arquivos
+# --------------------------------------------------------------------------- #
+@st.cache_resource
+def _banco_persistente():
+    try:
+        segredos = dict(st.secrets)
+    except Exception:  # noqa: BLE001 - sem secrets.toml
+        segredos = {}
+    return bc.criar(segredos, raiz=Path(__file__).parent)
+
+
+banco = None if modo_demo else _banco_persistente()
+# historico inicial: so vai para o banco compartilhado (Supabase), uma unica vez
+if banco is not None and banco.compartilhado and not st.session_state.get("_hist_inicial_ok"):
+    try:
+        _imp = hi.importar_inicial(banco, Path(__file__).parent / "data" / "historico_inicial.json")
+        if _imp:
+            st.session_state["_hist_res"] = _imp
+            st.toast(_imp["mensagem"], icon="📜")
+    except Exception as e:  # noqa: BLE001
+        st.session_state["_hist_res"] = {"status": "erro",
+                                         "mensagem": f"Falha ao importar historico inicial: {e}"}
+    st.session_state["_hist_inicial_ok"] = True
+if banco is not None and candidatos:
+    _assin = hi.assinatura(sc_bytes, pc_bytes, dist_bytes)
+    if st.session_state.get("_hist_assin") != _assin:
+        try:
+            with st.spinner("Atualizando o historico..."):
+                _res = hi.sincronizar(
+                    banco, _proc["model"], ped_agg, st.session_state.get("_refs_iso", {}),
+                    _assin, usuario,
+                    {t: d.get("nome") for t, d in resolvido["detalhes"].items()},
+                    _proc["pcs_itens"])
+        except Exception as e:  # noqa: BLE001
+            _res = {"status": "erro", "mensagem": f"Nao consegui gravar o historico: {e}"}
+        st.session_state["_hist_assin"] = _assin
+        st.session_state["_hist_res"] = _res
+        if _res.get("status") == "gravado":
+            st.toast(_res["mensagem"], icon="📜")
+            st.session_state["_hist_versao"] = st.session_state.get("_hist_versao", 0) + 1
+_hres = st.session_state.get("_hist_res")
+if banco is not None:
+    _icone = {"gravado": "📜", "ja_gravado": "📜", "antigo": "⚠️", "erro": "❌"}
+    st.sidebar.caption(
+        f"Historico em: {banco.nome}"
+        + (f"  \n{_icone.get(_hres.get('status'), 'ℹ️')} {_hres.get('mensagem')}" if _hres else ""))
 
 # --------------------------------------------------------------------------- #
 # Filtros globais
@@ -339,9 +401,10 @@ tabs = st.tabs(on_change="rerun", key="aba", tabs=[
     "👥 Compradores",
     "🚚 Entregas pendentes",
     "🔎 Visao 360 por SC",
+    "📜 Historico",
     "🧪 Qualidade de dados",
 ])
-(tab_geral, tab_alertas, tab1, tab2, tab3, tab4, tab5, tab6) = tabs
+(tab_geral, tab_alertas, tab1, tab2, tab3, tab4, tab5, tab_hist, tab6) = tabs
 
 COLS_SC = [
     "NUM.SC", "ITEM", "tipo_cod", "DESCRICAO", "QTD", "VALOR",
@@ -608,13 +671,25 @@ def _aba_backlog():
     def _salvar(chave: str, campo: str):
         chave_w = f"{campo}_{chave}"
         valor = st.session_state.get(chave_w)
+        col = "atendida" if campo == "at" else "onde_encontrar"
+        lin = acomp_f[acomp_f["chave"] == chave]
+        antigo = lin.iloc[0][col] if len(lin) else None
         try:
             if campo == "at":
-                store.salvar(chave, usuario or "?", atendida=bool(valor))
+                novo = bool(valor)
+                store.salvar(chave, usuario or "?", atendida=novo)
+                antigo = bool(antigo) if antigo is not None and pd.notna(antigo) else False
             else:
+                novo = " ".join(str(valor).split()).upper() if valor else None
                 store.salvar(chave, usuario or "?", onde=valor or "")
                 if valor:  # mostra ja padronizado (mesma grafia para todos)
-                    st.session_state[chave_w] = " ".join(str(valor).split()).upper()
+                    st.session_state[chave_w] = novo
+                antigo = antigo if antigo is not None and pd.notna(antigo) else None
+            if banco is not None and antigo != novo:
+                try:
+                    hi.registrar_marcacao(banco, chave, col, antigo, novo, usuario or "?")
+                except Exception:  # noqa: BLE001 - log nao pode travar a marcacao
+                    pass
             st.toast("Salvo ✓", icon="💾")
         except Exception as e:  # noqa: BLE001
             st.toast(f"Erro ao salvar: {e}", icon="⚠️")
@@ -924,49 +999,286 @@ if tab4.open:
 # --------------------------------------------------------------------------- #
 # Tab 5 - Visao 360 por SC
 # --------------------------------------------------------------------------- #
+@st.cache_data(ttl=300, show_spinner="Lendo o historico...")
+def _hist_itens(_b, versao: int) -> pd.DataFrame:
+    df = pd.DataFrame(_b.select("sc_item"), columns=bc.ESQUEMA["sc_item"]["cols"])
+    for c in ("dt_emissao", "dt_necessidade", "dt_distribuicao", "dt_pedido", "dt_entrega",
+              "primeira_vez", "ultima_vez", "dt_saiu"):
+        df[c] = pd.to_datetime(df[c], errors="coerce")
+    for c in ("qtd", "valor"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["entregue"] = df["entregue"].fillna(False).astype(bool)
+    return df
+
+
+@st.cache_data(ttl=300, show_spinner="Lendo o historico...")
+def _hist_eventos(_b, versao: int) -> pd.DataFrame:
+    df = pd.DataFrame(_b.select("sc_evento"), columns=bc.ESQUEMA["sc_evento"]["cols"])
+    df["data"] = pd.to_datetime(df["data"], errors="coerce")
+    return df
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _hist_cargas(_b, versao: int) -> pd.DataFrame:
+    return pd.DataFrame(_b.select("carga", ordem="ref_sc.desc"),
+                        columns=bc.ESQUEMA["carga"]["cols"])
+
+
+def _fdata(d):
+    return pd.Timestamp(d).strftime("%d/%m/%Y") if d is not None and pd.notna(d) else "-"
+
+
+def linha_do_tempo(chave: str):
+    """Eventos do historico + alteracoes nas marcacoes, em ordem."""
+    if banco is None:
+        st.caption("Historico desligado no modo demonstracao.")
+        return
+    try:
+        evs = hi.eventos_da_sc(banco, chave)
+        logs = hi.log_da_sc(banco, chave)
+    except Exception as e:  # noqa: BLE001
+        st.caption(f"Nao consegui ler o historico: {e}")
+        return
+    itens = [(e.get("data") or "", 0, hi.EVENTO_ICONE.get(e["evento"], "•"),
+              hi.EVENTO_LABEL.get(e["evento"], e["evento"]), e.get("detalhe") or "")
+             for e in evs]
+    for lg in logs:
+        if lg["campo"] == "atendida":
+            txt = "Marcada como atendida" if lg["valor_novo"] in ("True", "true", "1") \
+                else "Desmarcada como atendida"
+            ico = "✅"
+        else:
+            txt = f"Onde encontrar: {lg['valor_antigo'] or '-'} → {lg['valor_novo'] or '-'}"
+            ico = "📍"
+        itens.append(((lg.get("em") or "")[:10], 1, ico, txt, f"por {lg.get('usuario') or '?'}"))
+    if not itens:
+        st.caption("Sem historico ainda: ele comeca a ser gravado a partir da primeira "
+                   "subida das planilhas com o banco ligado.")
+        return
+    html_itens = "".join(
+        f'<div class="tl-it"><div class="tl-ico">{ico}</div><div><b>{ui.html.escape(t)}</b>'
+        f'<span class="tl-dt">{_fdata(d) if d else ""}</span><br>'
+        f'<span class="tl-det">{ui.html.escape(det)}</span></div></div>'
+        for d, _, ico, t, det in sorted(itens, key=lambda x: (x[0], x[1])))
+    st.markdown(f'<div class="tl">{html_itens}</div>', unsafe_allow_html=True)
+
+
 @st.fragment
 def _aba_360():
-    ui.secao("Rastreio completo de uma SC", "Distribuicao → pedido → entrega.")
+    ui.secao("Rastreio completo de uma SC",
+             "Distribuicao → pedido → entrega, com a linha do tempo gravada no historico "
+             "(inclusive SCs que ja sairam do rmatr029).")
     num = st.text_input("Numero da SC (ex.: 052507)").strip()
-    if num:
-        alvo = model[model["NUM.SC"].astype(str).str.contains(num, na=False, regex=False)]
-        if alvo.empty:
-            st.warning("SC nao encontrada na demanda atual (rmatr029).")
-        else:
-            for _, r in alvo.iterrows():
-                with st.container(border=True):
-                    st.markdown(f"**SC {r['NUM.SC']} - item {r['ITEM']}** · {r['DESCRICAO']}")
-                    a, b_, c = st.columns(3)
-                    nec = (pd.Timestamp(r["DT_NECESSIDADE"]).strftime("%d/%m/%Y")
-                           if pd.notna(r["DT_NECESSIDADE"]) else "-")
-                    a.markdown(f"Tipo: **{r['tipo_cod']}**  \nQtd: **{r['QTD']:g}**  \n"
-                               f"Valor: **{ui.brl(r['VALOR'])}**  \n"
-                               f"Aprovado: **{r['APROVADO']}**  \nNecessidade: **{nec}**")
-                    if r["distribuida"]:
-                        dt = r["dt_distribuicao"]
-                        dtxt = pd.Timestamp(dt).strftime("%d/%m/%Y") if pd.notna(dt) else "-"
-                        b_.success(f"Distribuida\n\nResponsavel: **{r['responsavel'] or 'nao identificado'}**\n\nEm: {dtxt}")
+    if not num:
+        return
+    alvo = model[model["NUM.SC"].astype(str).str.contains(num, na=False, regex=False)]
+    hist = pd.DataFrame()
+    if banco is not None:
+        try:
+            hist = _hist_itens(banco, st.session_state.get("_hist_versao", 0))
+            hist = hist[hist["num_sc"].astype(str).str.contains(num, na=False, regex=False)]
+        except Exception:  # noqa: BLE001
+            hist = pd.DataFrame()
+    chaves = list(dict.fromkeys(list(alvo["chave"]) + list(hist.get("chave", []))))
+    if not chaves:
+        st.warning("SC nao encontrada no rmatr029 atual nem no historico.")
+        return
+    for chave in chaves[:30]:
+        atual = alvo[alvo["chave"] == chave]
+        with st.container(border=True):
+            if len(atual):
+                r = atual.iloc[0]
+                st.markdown(f"**SC {r['NUM.SC']} - item {r['ITEM']}** · {r['DESCRICAO']}")
+                a, b_, c = st.columns(3)
+                a.markdown(f"Tipo: **{r['tipo_cod']}**  \nQtd: **{r['QTD']:g}**  \n"
+                           f"Valor: **{ui.brl(r['VALOR'])}**  \n"
+                           f"Aprovado: **{r['APROVADO']}**  \n"
+                           f"Necessidade: **{_fdata(r['DT_NECESSIDADE'])}**")
+                if r["distribuida"]:
+                    b_.success(f"Distribuida\n\nResponsavel: **{r['responsavel'] or 'nao identificado'}**"
+                               f"\n\nEm: {_fdata(r['dt_distribuicao'])}")
+                else:
+                    b_.error("Sem registro de distribuicao")
+                if r["com_pedido"]:
+                    ped = ped_agg[ped_agg["PEDIDO COMPRA"].astype(str) == str(r["PEDIDO"])]
+                    lt_txt = (f"\n\nTempo SC → pedido: **{r['lead_time_dias']:.0f} dias**"
+                              if pd.notna(r["lead_time_dias"]) else "")
+                    if not ped.empty:
+                        pr = ped.iloc[0]
+                        status = "Entregue" if pr["entregue_total"] else f"Saldo {pr['saldo']:g}"
+                        c.info(f"Pedido **{r['PEDIDO']}**\n\n{pr['fornecedor']}\n\n"
+                               f"Entrega: **{status}**{lt_txt}")
                     else:
-                        b_.error("Sem registro de distribuicao")
-                    if r["com_pedido"]:
-                        ped = ped_agg[ped_agg["PEDIDO COMPRA"].astype(str) == str(r["PEDIDO"])]
-                        lt_txt = (f"\n\nTempo SC → pedido: **{r['lead_time_dias']:.0f} dias**"
-                                  if pd.notna(r["lead_time_dias"]) else "")
-                        if not ped.empty:
-                            pr = ped.iloc[0]
-                            status = "Entregue" if pr["entregue_total"] else f"Saldo {pr['saldo']:g}"
-                            c.info(f"Pedido **{r['PEDIDO']}**\n\n{pr['fornecedor']}\n\n"
-                                   f"Entrega: **{status}**{lt_txt}")
-                        else:
-                            c.info(f"Pedido **{r['PEDIDO']}** (fora do rmatr052 atual){lt_txt}")
-                    else:
-                        c.warning("Ainda sem pedido" + (" · **necessidade vencida**"
-                                                        if r["vencida"] else ""))
+                        c.info(f"Pedido **{r['PEDIDO']}** (fora do rmatr052 atual){lt_txt}")
+                else:
+                    c.warning("Ainda sem pedido" + (" · **necessidade vencida**"
+                                                    if r["vencida"] else ""))
+            else:
+                h = hist[hist["chave"] == chave].iloc[0]
+                st.markdown(f"**SC {h['num_sc']} - item {h['item']}** · {h['descricao']}  "
+                            f"<span class='bdg ok'>Saiu do rmatr029 em {_fdata(h['dt_saiu'])}</span>",
+                            unsafe_allow_html=True)
+                a, b_, c = st.columns(3)
+                a.markdown(f"Tipo: **{h['tipo_cod']}**  \nQtd: **{(h['qtd'] or 0):g}**  \n"
+                           f"Valor: **{ui.brl(h['valor'])}**  \n"
+                           f"Emissao: **{_fdata(h['dt_emissao'])}**")
+                b_.success(f"Responsavel: **{h['responsavel'] or '-'}**\n\n"
+                           f"Distribuida em: {_fdata(h['dt_distribuicao'])}")
+                if h["pedido"]:
+                    dias = ((h["dt_pedido"] - h["dt_emissao"]).days
+                            if pd.notna(h["dt_pedido"]) and pd.notna(h["dt_emissao"]) else None)
+                    c.info(f"Pedido **{h['pedido']}** em {_fdata(h['dt_pedido'])}"
+                           + (f"\n\nTempo SC → pedido: **{dias} dias**" if dias is not None else "")
+                           + f"\n\nEntrega: **{'Entregue' if h['entregue'] else 'pendente'}**")
+                else:
+                    c.warning("Pedido nao identificado no rmatr052")
+            with st.expander("📜 Linha do tempo", expanded=len(chaves) <= 3):
+                linha_do_tempo(chave)
+    if len(chaves) > 30:
+        st.caption(f"Mostrando 30 de {len(chaves)}. Digite o numero completo da SC.")
 
 
 if tab5.open:
     with tab5:
         _aba_360()
+
+# --------------------------------------------------------------------------- #
+# Historico
+# --------------------------------------------------------------------------- #
+@st.fragment
+def _aba_historico():
+    ui.secao("Historico das SCs",
+             "Tudo o que ja passou pelas planilhas, gravado a cada subida: inclusive as SCs "
+             "que ja viraram pedido e sairam do rmatr029.")
+    if banco is None:
+        ui.alerta("aviso", "📜", "Historico desligado no modo demonstracao",
+                  "Suba as planilhas reais para gravar e consultar o historico.")
+        return
+    versao = st.session_state.get("_hist_versao", 0)
+    try:
+        hi_it = _hist_itens(banco, versao)
+        hi_ev = _hist_eventos(banco, versao)
+        cargas = _hist_cargas(banco, versao)
+    except Exception as e:  # noqa: BLE001
+        ui.alerta("critico", "❌", "Nao consegui ler o historico", str(e))
+        return
+    if hi_it.empty:
+        ui.alerta("aviso", "📜", "Historico vazio",
+                  "Ele comeca a ser gravado na proxima subida das planilhas.")
+        return
+
+    h1, h2, h3 = st.columns([3, 3, 3])
+    periodo = h1.date_input(
+        "Periodo (data do acontecimento)",
+        value=(max(hi_ev["data"].min(), pd.Timestamp.today() - pd.Timedelta(days=90)).date(),
+               pd.Timestamp.today().date()), format="DD/MM/YYYY", key="hist_periodo")
+    comp_h = h2.multiselect("Comprador", sorted(hi_it["responsavel"].dropna().unique()),
+                            placeholder="Todos", key="hist_comp")
+    busca_h = h3.text_input("Buscar (SC, descricao, pedido)", key="hist_busca")
+
+    it = hi_it.copy()
+    if comp_h:
+        it = it[it["responsavel"].isin(comp_h)]
+    if busca_h:
+        txt = (it["num_sc"].astype(str) + " " + it["descricao"].astype(str) + " "
+               + it["pedido"].astype(str))
+        it = it[txt.str.contains(busca_h, case=False, na=False, regex=False)]
+    ini, fim = (periodo if isinstance(periodo, (list, tuple)) and len(periodo) == 2
+                else (hi_ev["data"].min(), pd.Timestamp.today()))
+    ini, fim = pd.Timestamp(ini), pd.Timestamp(fim)
+    ev = hi_ev[hi_ev["chave"].isin(it["chave"]) & hi_ev["data"].between(ini, fim)]
+
+    it["dias_ate_pedido"] = (it["dt_pedido"] - it["dt_emissao"]).dt.days
+    com_ped = it[it["dt_pedido"].between(ini, fim) & it["dias_ate_pedido"].notna()]
+    encerr = it[it["dt_saiu"].between(ini, fim)]
+    ui.kpis([
+        {"rot": "SC-itens no historico", "val": ui.num(len(it)), "cor": ui.AZUL,
+         "sub": f"desde <b>{_fdata(hi_it['primeira_vez'].min())}</b>"},
+        {"rot": "Viraram pedido", "val": ui.num(len(com_ped)), "cor": ui.AQUA,
+         "sub": "no periodo"},
+        {"rot": "Tempo SC → pedido", "cor": ui.AZUL_ESCURO,
+         "val": f"{com_ped['dias_ate_pedido'].median():.0f} dias" if len(com_ped) else "-",
+         "sub": (f"mediana · 90% em ate <b>{com_ped['dias_ate_pedido'].quantile(.9):.0f} dias</b>"
+                 if len(com_ped) else "da emissao ao pedido")},
+        {"rot": "Sairam do rmatr029", "val": ui.num(len(encerr)), "cor": ui.BOM,
+         "sub": f"<b>{int(encerr['pedido'].notna().sum())}</b> com pedido identificado"},
+        {"rot": "Subidas gravadas", "val": ui.num(len(cargas)), "cor": ui.LARANJA,
+         "sub": f"ultima: <b>{_fdata(cargas['ref_sc'].iloc[0]) if len(cargas) else '-'}</b>"},
+    ])
+
+    g1, g2 = st.columns([3, 2], gap="medium")
+    with g1, st.container(border=True):
+        ui.secao("Entrada x pedidos por semana",
+                 "SC-itens emitidos x SC-itens que viraram pedido, pela data de cada um.")
+        sem = pd.DataFrame({
+            "Emitidas": it[it["dt_emissao"].between(ini, fim)]
+            .groupby(pd.Grouper(key="dt_emissao", freq="W-MON", label="left", closed="left")).size(),
+            "Viraram pedido": com_ped
+            .groupby(pd.Grouper(key="dt_pedido", freq="W-MON", label="left", closed="left")).size(),
+        }).fillna(0)
+        if len(sem):
+            rot = [f"{d:%d/%m}" for d in sem.index]
+            fig = go.Figure()
+            fig.add_bar(x=rot, y=sem["Emitidas"], name="Emitidas", marker_color=ui.AZUL,
+                        hovertemplate="Semana de %{x}: %{y} emitidas<extra></extra>")
+            fig.add_scatter(x=rot, y=sem["Viraram pedido"], name="Viraram pedido",
+                            mode="lines+markers", line=dict(color=ui.LARANJA, width=2.5),
+                            marker=dict(size=8, line=dict(color="#fff", width=2)),
+                            hovertemplate="Semana de %{x}: %{y} com pedido<extra></extra>")
+            ui.estilo(fig, 300)
+            fig.update_layout(hovermode="x unified")
+            ui.grafico(fig)
+        else:
+            st.caption("Sem dados no periodo.")
+    with g2, st.container(border=True):
+        ui.secao("Tempo ate o pedido por comprador", "Mediana em dias, no periodo.")
+        tc = (com_ped.dropna(subset=["responsavel"]).groupby("responsavel")["dias_ate_pedido"]
+              .agg(["median", "size"]).sort_values("median"))
+        if len(tc):
+            fig = go.Figure(go.Bar(
+                y=tc.index, x=tc["median"], orientation="h", marker_color=ui.AZUL_ESCURO,
+                text=[f"{m:.0f} d · {n} SC" for m, n in zip(tc["median"], tc["size"])],
+                textposition="outside", cliponaxis=False, textfont=dict(color=ui.TINTA_2),
+                hovertemplate="%{y}: %{x:.0f} dias (mediana)<extra></extra>"))
+            ui.estilo(fig, 300, legenda=False, horizontal=True)
+            fig.update_xaxes(visible=False, range=[0, tc["median"].max() * 1.45 + 1])
+            ui.grafico(fig)
+        else:
+            st.caption("Sem pedidos no periodo.")
+
+    with st.container(border=True):
+        ui.secao("Acontecimentos no periodo", "Mais recentes primeiro.")
+        tipos_ev = st.pills("Tipo", list(hi.EVENTO_LABEL), selection_mode="multi",
+                            format_func=lambda k: f"{hi.EVENTO_ICONE[k]} {hi.EVENTO_LABEL[k]}",
+                            key="hist_tipos")
+        evs = ev if not tipos_ev else ev[ev["evento"].isin(tipos_ev)]
+        tab_ev = evs.merge(it[["chave", "num_sc", "item", "descricao", "responsavel"]],
+                           on="chave", how="left").sort_values(["data", "id"], ascending=False)
+        tab_ev = pd.DataFrame({
+            "DATA": tab_ev["data"].dt.strftime("%d/%m/%Y"),
+            "EVENTO": tab_ev["evento"].map(lambda k: f"{hi.EVENTO_ICONE.get(k, '')} "
+                                                     f"{hi.EVENTO_LABEL.get(k, k)}"),
+            "SC": tab_ev["num_sc"], "ITEM": tab_ev["item"], "DESCRICAO": tab_ev["descricao"],
+            "DETALHE": tab_ev["detalhe"], "RESPONSAVEL": tab_ev["responsavel"],
+        })
+        st.dataframe(tab_ev, width="stretch", hide_index=True, height=380)
+        st.caption(f"{len(tab_ev)} acontecimentos. Para ver a linha do tempo completa de uma "
+                   "SC, use a aba 🔎 Visao 360.")
+        baixar_csv(tab_ev, "historico_acontecimentos.csv", "⬇️ Baixar acontecimentos (CSV)")
+
+    with st.expander(f"📦 Subidas gravadas ({len(cargas)})"):
+        st.dataframe(pd.DataFrame({
+            "GRAVADO EM": pd.to_datetime(cargas["criado_em"]).dt.strftime("%d/%m/%Y %H:%M"),
+            "POR": cargas["usuario"], "EXTRACAO SC": pd.to_datetime(cargas["ref_sc"]).dt.strftime("%d/%m/%Y"),
+            "EXTRACAO PC": pd.to_datetime(cargas["ref_pc"]).dt.strftime("%d/%m/%Y"),
+            "DISTRIBUICAO ATE": pd.to_datetime(cargas["ref_dist"]).dt.strftime("%d/%m/%Y"),
+            "SC-ITENS": cargas["n_itens"], "ACONTECIMENTOS": cargas["n_eventos"],
+        }), width="stretch", hide_index=True)
+
+
+if tab_hist.open:
+    with tab_hist:
+        _aba_historico()
 
 # --------------------------------------------------------------------------- #
 # Tab 6 - Qualidade de dados

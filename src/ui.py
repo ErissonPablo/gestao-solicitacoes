@@ -133,6 +133,17 @@ div[class*="st-key-sc-ok-"] {{ border-left-color: {BOM} !important;
   background: #f3fbf3 !important; }}
 div[class*="st-key-sc-ok-"] .sc-desc {{ color: #4b6b4b; }}
 div[class*="st-key-sc-"]:hover {{ background: #fafcff; }}
+
+/* Linha do tempo */
+.tl {{ position: relative; margin: 4px 0 4px 6px; padding-left: 18px;
+  border-left: 2px solid #dbe4f0; }}
+.tl-it {{ position: relative; display: flex; gap: 10px; margin: 0 0 12px -31px;
+  align-items: flex-start; }}
+.tl-ico {{ background: #fff; border: 2px solid #dbe4f0; border-radius: 999px; width: 26px;
+  height: 26px; display: flex; align-items: center; justify-content: center;
+  font-size: .8rem; flex: none; }}
+.tl-dt {{ color: var(--mudo); font-size: .8rem; margin-left: 8px; }}
+.tl-det {{ color: var(--tinta-2); font-size: .84rem; }}
 </style>
 """
 
