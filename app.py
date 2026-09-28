@@ -142,6 +142,7 @@ SEGREDOS, ERRO_SEGREDOS = _ler_segredos()
 # A conexao fica guardada na memoria do servidor; a "assinatura" da configuracao
 # faz o app criar uma nova assim que os Secrets mudam (sem precisar reiniciar).
 CFG_BANCO = _hl.sha1(f"{SEGREDOS.get('supabase_url', '')}|{SEGREDOS.get('supabase_key', '')}"
+                     f"|{','.join(st_store.COLS)}"
                      .encode()).hexdigest()
 
 
@@ -333,6 +334,10 @@ try:
 except Exception as e:  # noqa: BLE001
     st.sidebar.error(f"Nao consegui ler as marcacoes ({store.nome}): {e}")
     acomp = st_store._vazio()
+
+# Garante todas as colunas, mesmo se o store em cache for de uma versao antiga
+# do app (sem reaberta_em / reaberta_obs) ou se o banco ainda nao tiver a coluna.
+acomp = acomp.reindex(columns=st_store.COLS)
 
 COLS_ACOMP = ["chave", "atendida", "atendida_por", "atendida_em", "onde_encontrar",
               "reaberta_em", "reaberta_obs"]
@@ -723,6 +728,7 @@ def _aba_backlog():
         acomp_f = store.carregar()
     except Exception:  # noqa: BLE001
         acomp_f = acomp
+    acomp_f = acomp_f.reindex(columns=st_store.COLS)
     backlog = mf_base[~mf_base["com_pedido"]].merge(
         acomp_f[COLS_ACOMP], on="chave", how="left")
     backlog["atendida"] = backlog["atendida"].fillna(False).astype(bool)
