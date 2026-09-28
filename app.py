@@ -19,7 +19,9 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).parent))
 from src import loaders, crossref, normalize as nz, datasource as ds  # noqa: E402
 from src import metrics as mt, ui, export, store as st_store  # noqa: E402
-from src import banco as bc, historico as hi  # noqa: E402
+from src import banco as bc, historico as hi, armazem as arm  # noqa: E402
+import hashlib as _hl  # noqa: E402
+import json as _json  # noqa: E402
 import html as _html  # noqa: E402
 
 st.set_page_config(
@@ -43,7 +45,7 @@ def _demo() -> dict:
 
 # Mudou a regra de leitura/cruzamento? Troque a versao: invalida o cache antigo
 # (o cache do Streamlit so enxerga o codigo da propria funcao, nao o de src/).
-VERSAO_MOTOR = "2026-09-28"
+VERSAO_MOTOR = "2026-09-28b"
 
 
 @st.cache_data(show_spinner="Identificando os arquivos...", max_entries=5)
@@ -123,22 +125,102 @@ TIPO_NOME = {
 }
 
 # --------------------------------------------------------------------------- #
+# Banco / Secrets (antes da barra lateral: a "ultima carga da equipe" vem dele)
+# --------------------------------------------------------------------------- #
+def _ler_segredos() -> tuple[dict, str | None]:
+    """Secrets do Streamlit (PC: .streamlit/secrets.toml; nuvem: Settings -> Secrets)."""
+    try:
+        return {k: st.secrets[k] for k in st.secrets}, None
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        if "pars" in msg.lower():  # arquivo existe mas o TOML tem erro de formato
+            return {}, msg.split(":", 1)[-1].strip()[:200]
+        return {}, None  # sem secrets.toml: tudo bem, usa o arquivo local
+
+
+SEGREDOS, ERRO_SEGREDOS = _ler_segredos()
+# A conexao fica guardada na memoria do servidor; a "assinatura" da configuracao
+# faz o app criar uma nova assim que os Secrets mudam (sem precisar reiniciar).
+CFG_BANCO = _hl.sha1(f"{SEGREDOS.get('supabase_url', '')}|{SEGREDOS.get('supabase_key', '')}"
+                     .encode()).hexdigest()
+
+
+@st.cache_resource
+def _store_persistente(cfg: str):
+    return st_store.criar(SEGREDOS, demo=False, raiz=Path(__file__).parent)
+
+
+@st.cache_resource
+def _banco_persistente(cfg: str):
+    return bc.criar(SEGREDOS, raiz=Path(__file__).parent)
+
+
+@st.cache_resource
+def _armazem_persistente(cfg: str):
+    return arm.criar(SEGREDOS, raiz=Path(__file__).parent)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _ultima_publicada(_b, cfg: str, versao: int):
+    return arm.ultima_publicada(_b)
+
+
+@st.cache_data(show_spinner="Baixando a ultima carga da equipe...", max_entries=2)
+def _baixar_publicada(_a, assin: str, storage_json: str) -> dict:
+    return arm.baixar_carga(_a, {"storage": _json.loads(storage_json)})
+
+
+# --------------------------------------------------------------------------- #
 # Sidebar - fonte de dados
 # --------------------------------------------------------------------------- #
 st.sidebar.title("🛒 Gestao de SC")
 st.sidebar.caption("Cruzamento Protheus x Distribuicao x Pedidos")
 
+FONTE_EQUIPE = "Ultima carga da equipe"
 fonte = st.sidebar.radio(
     "Fonte dos dados",
-    ["Upload de arquivos", "Pasta local", "SharePoint", "Demonstracao (dados ficticios)"],
-    help="Os 3 arquivos: rmatr029 (SCs), rmatr052 (Pedidos) e a planilha de distribuicao.",
+    [FONTE_EQUIPE, "Upload de arquivos", "Pasta local", "SharePoint",
+     "Demonstracao (dados ficticios)"],
+    help="Ultima carga da equipe: os arquivos que alguem ja subiu (ninguem precisa "
+         "subir de novo). Upload: suba os 3 arquivos novos - eles viram a carga da "
+         "equipe para todo mundo.",
 )
 
 sc_bytes = pc_bytes = dist_bytes = None
 candidatos: list = []
+carga_equipe = None
 modo_demo = fonte.startswith("Demonstracao")
 
-if fonte == "Upload de arquivos":
+if fonte == FONTE_EQUIPE:
+    try:
+        _b0 = _banco_persistente(CFG_BANCO)
+        carga_equipe = _ultima_publicada(_b0, CFG_BANCO, st.session_state.get("_hist_versao", 0))
+        if carga_equipe:
+            _dados = _baixar_publicada(_armazem_persistente(CFG_BANCO),
+                                       carga_equipe["assinatura"],
+                                       _json.dumps(carga_equipe["storage"], sort_keys=True))
+            sc_bytes, pc_bytes, dist_bytes = _dados.get("sc"), _dados.get("pc"), _dados.get("dist")
+    except Exception as e:  # noqa: BLE001
+        st.sidebar.error(f"Nao consegui baixar a ultima carga da equipe: {e}")
+        carga_equipe = None
+    if carga_equipe:
+        def _f(d, fmt="%d/%m"):
+            dt = pd.to_datetime(d, errors="coerce")
+            return dt.strftime(fmt) if pd.notna(dt) else "?"
+        st.sidebar.success(
+            f"📦 **Carga da equipe**\n\n"
+            f"SCs (rmatr029): **{_f(carga_equipe.get('ref_sc'))}** · "
+            f"Pedidos: **{_f(carga_equipe.get('ref_pc'))}** · "
+            f"Distribuicao ate **{_f(carga_equipe.get('ref_dist'))}**\n\n"
+            f"Enviada por **{carga_equipe.get('usuario') or '(sem nome)'}** em "
+            f"{_f(carga_equipe.get('criado_em'), '%d/%m %H:%M')}")
+        st.sidebar.caption("Tem planilha mais nova? Use **Upload de arquivos**: ela passa "
+                           "a ser a carga de todo mundo.")
+    else:
+        st.sidebar.info("Ninguem publicou uma carga ainda. Use **Upload de arquivos** "
+                        "uma vez - depois todo mundo abre direto.")
+
+elif fonte == "Upload de arquivos":
     st.sidebar.caption(
         "Solte os arquivos - a ferramenta identifica cada um pelo conteudo, "
         "nao importa o nome."
@@ -221,6 +303,8 @@ if not (sc_bytes and pc_bytes and dist_bytes):
         "A ferramenta **identifica cada arquivo pelo conteudo** e, se houver mais de "
         "uma extracao do mesmo tipo, usa sempre a **mais recente** - nada e contado "
         "em dobro.\n\n"
+        "Depois que alguem subir, a equipe toda abre direto em **Ultima carga da "
+        "equipe**, sem precisar subir de novo.\n\n"
         "Quer so conhecer as telas? Escolha **Demonstracao** na barra lateral."
     )
     st.stop()
@@ -237,30 +321,6 @@ ped_agg = _proc["ped_agg"]
 # --------------------------------------------------------------------------- #
 # Acompanhamento manual (Atendida / Onde encontrar) - salvo por SC-item
 # --------------------------------------------------------------------------- #
-def _ler_segredos() -> tuple[dict, str | None]:
-    """Secrets do Streamlit (PC: .streamlit/secrets.toml; nuvem: Settings -> Secrets)."""
-    try:
-        return {k: st.secrets[k] for k in st.secrets}, None
-    except Exception as e:  # noqa: BLE001
-        msg = str(e)
-        if "pars" in msg.lower():  # arquivo existe mas o TOML tem erro de formato
-            return {}, msg.split(":", 1)[-1].strip()[:200]
-        return {}, None  # sem secrets.toml: tudo bem, usa o arquivo local
-
-
-SEGREDOS, ERRO_SEGREDOS = _ler_segredos()
-# A conexao fica guardada na memoria do servidor; a "assinatura" da configuracao
-# faz o app criar uma nova assim que os Secrets mudam (sem precisar reiniciar).
-import hashlib as _hl  # noqa: E402
-CFG_BANCO = _hl.sha1(f"{SEGREDOS.get('supabase_url', '')}|{SEGREDOS.get('supabase_key', '')}"
-                     .encode()).hexdigest()
-
-
-@st.cache_resource
-def _store_persistente(cfg: str):
-    return st_store.criar(SEGREDOS, demo=False, raiz=Path(__file__).parent)
-
-
 if modo_demo:
     if "_store_demo" not in st.session_state:
         st.session_state["_store_demo"] = st_store.criar(None, demo=True, raiz=Path("."))
@@ -274,7 +334,8 @@ except Exception as e:  # noqa: BLE001
     st.sidebar.error(f"Nao consegui ler as marcacoes ({store.nome}): {e}")
     acomp = st_store._vazio()
 
-COLS_ACOMP = ["chave", "atendida", "atendida_por", "atendida_em", "onde_encontrar"]
+COLS_ACOMP = ["chave", "atendida", "atendida_por", "atendida_em", "onde_encontrar",
+              "reaberta_em", "reaberta_obs"]
 model = model.merge(acomp[COLS_ACOMP], on="chave", how="left")
 model["atendida"] = model["atendida"].fillna(False).astype(bool)
 
@@ -289,11 +350,6 @@ st.sidebar.caption(f"Marcacoes salvas em: {store.nome}")
 # --------------------------------------------------------------------------- #
 # Historico (vida de cada SC) - grava 1x por conjunto de arquivos
 # --------------------------------------------------------------------------- #
-@st.cache_resource
-def _banco_persistente(cfg: str):
-    return bc.criar(SEGREDOS, raiz=Path(__file__).parent)
-
-
 banco = None if modo_demo else _banco_persistente(CFG_BANCO)
 if not modo_demo:
     if ERRO_SEGREDOS:
@@ -333,7 +389,38 @@ if banco is not None and candidatos:
         if _res.get("status") == "gravado":
             st.toast(_res["mensagem"], icon="📜")
             st.session_state["_hist_versao"] = st.session_state.get("_hist_versao", 0) + 1
+        _refs = st.session_state.get("_refs_iso", {})
+        if _res.get("status") in ("gravado", "ja_gravado"):
+            # 1) publica a carga para a equipe (se for a mais nova e ainda nao publicada)
+            try:
+                _minha = banco.select("carga", {"assinatura": _assin})
+                _ult = arm.ultima_publicada(banco)
+                if (_minha and not _minha[0].get("storage")
+                        and (not _ult or str(_refs.get("sc", "")) >= str(_ult.get("ref_sc") or ""))):
+                    with st.spinner("Publicando a carga para a equipe..."):
+                        arm.publicar(_armazem_persistente(CFG_BANCO), banco, _assin, {
+                            t: (resolvido["detalhes"][t]["nome"], b)
+                            for t, b in (("sc", sc_bytes), ("pc", pc_bytes), ("dist", dist_bytes))})
+                    _ultima_publicada.clear()  # todo mundo ve a nova carga na hora
+                    st.toast("Carga publicada: a equipe ja abre com estes arquivos.", icon="📦")
+                    st.session_state["_hist_versao"] = st.session_state.get("_hist_versao", 0) + 1
+            except Exception as e:  # noqa: BLE001
+                st.sidebar.error(f"Nao consegui publicar a carga para a equipe: {e}")
+        if _res.get("status") == "gravado" and _refs.get("sc"):
+            # 2) desfaz 'Atendida' de SC que continua sem pedido numa extracao mais nova
+            try:
+                _reab = hi.reabrir_atendidas(store, banco, _proc["model"], _refs["sc"])
+            except Exception as e:  # noqa: BLE001
+                _reab = []
+                st.sidebar.error(f"Nao consegui conferir as SCs marcadas como atendidas: {e}")
+            if _reab:
+                st.session_state["_reabertas_msg"] = (
+                    f"{len(_reab)} SC-itens marcados como atendidos voltaram para pendente: "
+                    "continuam sem pedido na planilha nova.")
+                st.rerun()
 _hres = st.session_state.get("_hist_res")
+if st.session_state.get("_reabertas_msg"):
+    st.toast(st.session_state.pop("_reabertas_msg"), icon="⚠️")
 if banco is not None:
     _icone = {"gravado": "📜", "ja_gravado": "📜", "antigo": "⚠️", "erro": "❌"}
     st.sidebar.caption(
@@ -451,6 +538,7 @@ def _preparar(df: pd.DataFrame, extra: list | None = None) -> pd.DataFrame:
         "DT_NECESSIDADE": "NECESSIDADE", "dias_atraso": "ATRASO (dias)",
         "responsavel": "RESPONSAVEL", "DESC_DEPARTAMENTO": "DEPARTAMENTO",
         "atendida": "ATENDIDA", "onde_encontrar": "ONDE ENCONTRAR",
+        "reaberta_obs": "POR QUE VOLTOU",
     })
 
 
@@ -564,7 +652,13 @@ def _aba_alertas():
     dias_urg = st.slider("Considerar urgencia ALTA parada a partir de (dias)", 1, 30, 5)
     urg_paradas = urgentes[urgentes["idade_dias"] >= dias_urg]
     ent_antigas = pend[(~pend["chegou_fabrica"]) & (pend["dias_em_aberto"] > 30)]
+    desfeitas = backlog[(~backlog["atendida"]) & backlog["reaberta_em"].notna()]
 
+    if len(desfeitas):
+        ui.alerta("serio", "⚠️", f"{len(desfeitas)} SC-itens marcados como atendidos "
+                  "continuam sem pedido",
+                  "A marcacao foi desfeita automaticamente: o pedido provavelmente nao foi "
+                  "efetivado no Protheus.")
     if len(perdidas):
         ui.alerta("critico", "🔴", f"{len(perdidas)} SC-itens sem dono e sem pedido",
                   "Nao estao na planilha de distribuicao - ninguem esta cuidando delas.")
@@ -578,9 +672,15 @@ def _aba_alertas():
     if len(ent_antigas):
         ui.alerta("aviso", "🚚", f"{len(ent_antigas)} itens de pedido com mais de 30 dias "
                   "sem chegar", "Vale cobrar o fornecedor.")
-    if not (len(perdidas) or len(vencidas) or len(urg_paradas) or len(ent_antigas)):
+    if not (len(perdidas) or len(vencidas) or len(urg_paradas) or len(ent_antigas)
+            or len(desfeitas)):
         ui.alerta("ok", "✅", "Nenhum alerta no filtro atual", "Tudo sob controle.")
 
+    if len(desfeitas):
+        with st.expander(f"⚠️ Atendida desfeita - continua sem pedido ({len(desfeitas)})",
+                         expanded=True):
+            tabela_sc(desfeitas.sort_values("idade_dias", ascending=False),
+                      extra=["reaberta_obs"])
     if len(perdidas):
         with st.expander(f"🔴 Sem dono e sem pedido ({len(perdidas)})", expanded=True):
             tabela_sc(perdidas.sort_values("idade_dias", ascending=False))
@@ -636,7 +736,9 @@ def _aba_backlog():
     f_busca = f3.text_input("Buscar (descricao, SC, solicitante)", key="bl_busca")
     f4, f5, f6, f7 = st.columns([4, 2, 2, 2])
     f_sit = f4.segmented_control(
-        "Situacao", ["Pendentes", "Atendidas", "Todas"], default="Todas", key="bl_sit")
+        "Situacao", ["Pendentes", "Atendidas", "Desfeitas", "Todas"], default="Todas",
+        key="bl_sit", help="Desfeitas: estavam marcadas como atendidas, mas continuaram "
+                           "sem pedido na planilha seguinte.")
     f_urg = f5.checkbox("Somente urgencia ALTA", key="bl_urg")
     f_venc = f6.checkbox("Somente vencidas", key="bl_venc")
     agrupar = f7.toggle("Agrupar por local", key="bl_agrupar",
@@ -652,6 +754,8 @@ def _aba_backlog():
         b = b[~b["atendida"]]
     elif f_sit == "Atendidas":
         b = b[b["atendida"]]
+    elif f_sit == "Desfeitas":
+        b = b[(~b["atendida"]) & b["reaberta_em"].notna()]
     if f_urg:
         b = b[b["urgente"]]
     if f_venc:
@@ -720,7 +824,9 @@ def _aba_backlog():
 
     def cartao(r):
         chave = r["chave"]
-        estado = "ok" if r["atendida"] else ("venc" if r["vencida"] else
+        estado = "ok" if r["atendida"] else ("reab" if (pd.notna(r.get("reaberta_em"))
+                                                        and bool(r.get("reaberta_em")))
+                                             else "venc" if r["vencida"] else
                                              ("urg" if r["urgente"] else "normal"))
         with st.container(border=True, key=f"sc-{estado}-{chave}"):
             c_info, c_acao = st.columns([7, 3], gap="medium", vertical_alignment="center")
@@ -736,7 +842,13 @@ def _aba_backlog():
                 badges.append('<span class="bdg urg">🔥 Urgencia ALTA</span>')
             if pd.notna(r["onde_encontrar"]) and r["onde_encontrar"]:
                 badges.append(f'<span class="bdg local">📍 {_html.escape(r["onde_encontrar"])}</span>')
+            reaberta = (not r["atendida"]) and pd.notna(r.get("reaberta_em")) \
+                and bool(r.get("reaberta_em"))
+            if reaberta:
+                badges.insert(0, '<span class="bdg reab">⚠️ Atendida desfeita</span>')
             resp = r["responsavel"] if pd.notna(r["responsavel"]) and r["responsavel"] else "sem dono"
+            aviso_reab = (f'<div class="sc-reab">⚠️ {_html.escape(str(r.get("reaberta_obs") or ""))}. '
+                          "Confira se o pedido foi efetivado no Protheus.</div>" if reaberta else "")
             c_info.markdown(
                 f'<div class="sc-card">'
                 f'<div class="sc-top"><span class="sc-num">SC {_html.escape(str(r["NUM.SC"]))}'
@@ -751,7 +863,7 @@ def _aba_backlog():
                 f'<span>👤 <b>{_html.escape(str(resp))}</b></span>'
                 f'<span>Solicitante {_html.escape(str(r["SOLICITANTE"]))}</span>'
                 f'<span>{_html.escape(str(r["DESC_DEPARTAMENTO"]).title())}</span>'
-                f"</div></div>",
+                f"</div>{aviso_reab}</div>",
                 unsafe_allow_html=True,
             )
             k_at, k_onde = f"at_{chave}", f"onde_{chave}"

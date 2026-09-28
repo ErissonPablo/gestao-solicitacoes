@@ -22,7 +22,8 @@ from pathlib import Path
 import pandas as pd
 
 COLS = ["chave", "atendida", "atendida_por", "atendida_em", "onde_encontrar",
-        "atualizado_por", "atualizado_em"]
+        "atualizado_por", "atualizado_em", "reaberta_em", "reaberta_obs"]
+USUARIO_AUTOMATICO = "automatico"
 TABELA = "sc_acompanhamento"
 
 
@@ -41,12 +42,24 @@ def _campos_salvar(atendida, onde, usuario, anterior: dict | None) -> dict:
         reg["atendida"] = bool(atendida)
         reg["atendida_por"] = usuario if atendida else None
         reg["atendida_em"] = _agora() if atendida else None
+        # marcou/desmarcou na mao: some o aviso de "atendida desfeita"
+        reg["reaberta_em"] = None
+        reg["reaberta_obs"] = None
     if onde is not None:
         onde = " ".join(str(onde).split()).strip()
         reg["onde_encontrar"] = onde.upper() or None
     reg["atualizado_por"] = usuario
     reg["atualizado_em"] = _agora()
     reg.setdefault("atendida", False)
+    return reg
+
+
+def _campos_reabrir(anterior: dict | None, obs: str) -> dict:
+    """Desfaz a 'Atendida' automaticamente (SC continua sem pedido no Protheus)."""
+    reg = dict(anterior or {})
+    reg.update({"atendida": False, "atendida_por": None, "atendida_em": None,
+                "reaberta_em": _agora(), "reaberta_obs": obs,
+                "atualizado_por": USUARIO_AUTOMATICO, "atualizado_em": _agora()})
     return reg
 
 
@@ -65,6 +78,9 @@ class MemoriaStore:
     def salvar(self, chave: str, usuario: str, atendida=None, onde=None):
         self._d[chave] = _campos_salvar(atendida, onde, usuario, self._d.get(chave))
 
+    def reabrir(self, chave: str, obs: str):
+        self._d[chave] = _campos_reabrir(self._d.get(chave), obs)
+
 
 class SQLiteStore:
     compartilhado = False
@@ -78,6 +94,10 @@ class SQLiteStore:
                 chave TEXT PRIMARY KEY, atendida INTEGER DEFAULT 0,
                 atendida_por TEXT, atendida_em TEXT, onde_encontrar TEXT,
                 atualizado_por TEXT, atualizado_em TEXT)""")
+            existentes = {r[1] for r in c.execute(f"PRAGMA table_info({TABELA})")}
+            for col in ("reaberta_em", "reaberta_obs"):
+                if col not in existentes:
+                    c.execute(f"ALTER TABLE {TABELA} ADD COLUMN {col} TEXT")
 
     def _con(self):
         return sqlite3.connect(self.caminho, timeout=10)
@@ -94,12 +114,22 @@ class SQLiteStore:
                             (chave,)).fetchone()
             anterior = dict(zip(COLS, row)) if row else None
             reg = _campos_salvar(atendida, onde, usuario, anterior)
-            reg["chave"] = chave
-            c.execute(
-                f"INSERT OR REPLACE INTO {TABELA} ({', '.join(COLS)}) "
-                f"VALUES ({', '.join('?' * len(COLS))})",
-                [int(reg[k]) if k == "atendida" else reg.get(k) for k in COLS],
-            )
+            self._gravar(c, chave, reg)
+
+    def reabrir(self, chave: str, obs: str):
+        with self._con() as c:
+            row = c.execute(f"SELECT {', '.join(COLS)} FROM {TABELA} WHERE chave=?",
+                            (chave,)).fetchone()
+            self._gravar(c, chave, _campos_reabrir(dict(zip(COLS, row)) if row else None, obs))
+
+    @staticmethod
+    def _gravar(c, chave, reg):
+        reg["chave"] = chave
+        c.execute(
+            f"INSERT OR REPLACE INTO {TABELA} ({', '.join(COLS)}) "
+            f"VALUES ({', '.join('?' * len(COLS))})",
+            [int(bool(reg.get(k))) if k == "atendida" else reg.get(k) for k in COLS],
+        )
 
 
 class SupabaseStore:
@@ -116,9 +146,16 @@ class SupabaseStore:
         self._url = url.rstrip("/") + f"/rest/v1/{TABELA}"
 
     def carregar(self) -> pd.DataFrame:
-        r = self._s.get(self._url, params={"select": ",".join(COLS)}, timeout=15)
-        r.raise_for_status()
-        df = pd.DataFrame(r.json(), columns=COLS)
+        linhas, ini = [], 0
+        while True:  # o PostgREST devolve no maximo 1000 por vez
+            r = self._s.get(self._url, timeout=15, params={
+                "select": ",".join(COLS), "limit": 1000, "offset": ini})
+            r.raise_for_status()
+            linhas += r.json()
+            if len(r.json()) < 1000:
+                break
+            ini += 1000
+        df = pd.DataFrame(linhas, columns=COLS)
         df["atendida"] = df["atendida"].fillna(False).astype(bool)
         return df
 
@@ -127,8 +164,17 @@ class SupabaseStore:
                                            "chave": f"eq.{chave}"}, timeout=15)
         r.raise_for_status()
         anterior = r.json()[0] if r.json() else None
-        reg = _campos_salvar(atendida, onde, usuario, anterior)
+        self._gravar(chave, _campos_salvar(atendida, onde, usuario, anterior))
+
+    def reabrir(self, chave: str, obs: str):
+        r = self._s.get(self._url, params={"select": ",".join(COLS),
+                                           "chave": f"eq.{chave}"}, timeout=15)
+        r.raise_for_status()
+        self._gravar(chave, _campos_reabrir(r.json()[0] if r.json() else None, obs))
+
+    def _gravar(self, chave, reg):
         reg["chave"] = chave
+        reg = {k: reg.get(k) for k in COLS}
         r = self._s.post(self._url, json=reg, timeout=15,
                          headers={"Prefer": "resolution=merge-duplicates"})
         r.raise_for_status()

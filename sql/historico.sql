@@ -90,3 +90,10 @@ alter table public.sc_acompanhamento_log enable row level security;
 alter table public.carga                 enable row level security;
 alter table public.sc_item               enable row level security;
 alter table public.sc_evento             enable row level security;
+
+-- Carga da equipe e "atendida desfeita" (28/09/2026)
+alter table public.carga add column if not exists storage jsonb;
+alter table public.sc_acompanhamento add column if not exists reaberta_em timestamp;
+alter table public.sc_acompanhamento add column if not exists reaberta_obs text;
+insert into storage.buckets (id, name, public) values ('cargas', 'cargas', false)
+on conflict (id) do nothing;

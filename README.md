@@ -85,6 +85,22 @@ barra lateral para registrar quem marcou.
 > No Streamlit Cloud **sem** Supabase as marcações se perdem quando o app
 > reinicia.
 
+### Carga da equipe (subir uma vez, todo mundo vê)
+
+Quem sobe as planilhas em **Upload de arquivos** publica a carga: os 3 arquivos
+vão comprimidos para o Storage do Supabase (bucket privado `cargas`). Quem abre o
+app depois — de qualquer máquina — cai direto em **Última carga da equipe** e já
+vê tudo, sem subir nada. Só é publicada a carga **mais nova** (pela data interna
+do rmatr029); subir um arquivo antigo não troca a carga da equipe.
+
+### Atendida desfeita automaticamente
+
+Se uma SC marcada como **Atendida** aparece numa planilha **mais nova** (de dia
+seguinte ou depois da marcação) **ainda sem pedido**, o pedido provavelmente não
+foi efetivado no Protheus: a marcação é desfeita, o cartão ganha o aviso
+"⚠️ Atendida desfeita" com quem marcou e quando, entra em **Alertas** e no filtro
+**Situação → Desfeitas**, e fica registrada no histórico.
+
 ### Histórico (banco de dados)
 
 A cada subida das planilhas o app grava, **uma vez por conjunto de arquivos**, a
@@ -198,6 +214,7 @@ src/
   store.py          # marcacoes Atendida / Onde encontrar (SQLite ou Supabase)
   banco.py          # acesso ao banco (Supabase REST ou SQLite)
   historico.py      # vida de cada SC: sincronizacao, eventos, importacao inicial
+  armazem.py        # arquivos da carga da equipe (Supabase Storage ou data/cargas)
 sql/
   acompanhamento.sql  # tabela das marcacoes (ja incluida no historico.sql)
   historico.sql       # todas as tabelas do banco

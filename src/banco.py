@@ -18,7 +18,7 @@ ESQUEMA = {
     "carga": {
         "pk": "id",
         "cols": ["id", "criado_em", "usuario", "assinatura", "ref_sc", "ref_pc",
-                 "ref_dist", "n_itens", "n_eventos", "arquivos"],
+                 "ref_dist", "n_itens", "n_eventos", "arquivos", "storage"],
     },
     "sc_item": {
         "pk": "chave",
@@ -52,7 +52,7 @@ class SQLiteBanco:
             CREATE TABLE IF NOT EXISTS carga (
               id INTEGER PRIMARY KEY AUTOINCREMENT, criado_em TEXT, usuario TEXT,
               assinatura TEXT UNIQUE, ref_sc TEXT, ref_pc TEXT, ref_dist TEXT,
-              n_itens INTEGER, n_eventos INTEGER, arquivos TEXT);
+              n_itens INTEGER, n_eventos INTEGER, arquivos TEXT, storage TEXT);
             CREATE TABLE IF NOT EXISTS sc_item (
               chave TEXT PRIMARY KEY, num_sc TEXT, item TEXT, tipo_cod TEXT,
               produto TEXT, descricao TEXT, qtd REAL, valor REAL, solicitante TEXT,
@@ -70,6 +70,9 @@ class SQLiteBanco:
               valor_antigo TEXT, valor_novo TEXT, usuario TEXT, em TEXT);
             CREATE INDEX IF NOT EXISTS sc_log_chave ON sc_acompanhamento_log(chave);
             """)
+            cols_carga = {r[1] for r in c.execute("PRAGMA table_info(carga)")}
+            if "storage" not in cols_carga:
+                c.execute("ALTER TABLE carga ADD COLUMN storage TEXT")
 
     def _con(self):
         c = sqlite3.connect(self.caminho, timeout=15)
@@ -99,7 +102,22 @@ class SQLiteBanco:
         if tabela == "sc_item":
             for r in rows:
                 r["entregue"] = bool(r.get("entregue"))
+        if tabela == "carga":
+            for r in rows:
+                for k in ("arquivos", "storage"):
+                    if isinstance(r.get(k), str):
+                        try:
+                            r[k] = json.loads(r[k])
+                        except ValueError:
+                            pass
         return rows
+
+    def atualizar(self, tabela: str, filtros: dict, valores: dict):
+        sets = ", ".join(f"{k} = ?" for k in valores)
+        onde = " AND ".join(f"{k} = ?" for k in filtros)
+        with self._con() as c:
+            c.execute(f"UPDATE {tabela} SET {sets} WHERE {onde}",
+                      [self._enc(v) for v in valores.values()] + list(filtros.values()))
 
     def insert(self, tabela: str, linhas: list[dict]) -> list[dict]:
         if not linhas:
@@ -169,6 +187,12 @@ class SupabaseBanco:
             r.raise_for_status()
             out += r.json()
         return out
+
+    def atualizar(self, tabela: str, filtros: dict, valores: dict):
+        r = self._s.patch(self._base + tabela, json=valores, timeout=30,
+                          params={k: f"eq.{v}" for k, v in filtros.items()},
+                          headers={"Prefer": "return=minimal"})
+        r.raise_for_status()
 
     def upsert(self, tabela: str, linhas: list[dict]):
         pk = ESQUEMA[tabela]["pk"]

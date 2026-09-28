@@ -10,3 +10,4 @@ _*.py
 data/*.db
 data/*.json
 data/*.importado
+data/cargas/

@@ -123,6 +123,10 @@ section[data-testid="stSidebar"] {{ background: #f3f5f8; }}
 .bdg.ok {{ background: #e3f6e3; color: #006300; border-color: #b9e5b9; }}
 .bdg.venc {{ background: #fdecec; color: #a32121; border-color: #f4c4c4; }}
 .bdg.urg {{ background: #fff1e8; color: #9a3d12; border-color: #f7cdb5; }}
+.bdg.reab {{ background: #fff4e0; color: #8a5300; border-color: #f5d49a; }}
+.sc-reab {{ margin-top: 6px; font-size: .82rem; color: #8a5300; background: #fff8ec;
+  border: 1px solid #f5d49a; border-radius: 8px; padding: 5px 9px; }}
+div[class*="st-key-sc-reab-"] {{ border-left-color: {ALERTA} !important; }}
 .bdg.local {{ background: #eaf2fc; color: #1c5cab; border-color: #c7dcf5; }}
 div[class*="st-key-sc-"] {{ border-left: 5px solid #c3c2b7 !important;
   transition: background .15s; }}

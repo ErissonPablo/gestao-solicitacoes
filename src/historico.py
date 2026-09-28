@@ -29,10 +29,11 @@ EVENTO_LABEL = {
     "status": "Mudou status de aprovacao",
     "saiu": "Saiu do rmatr029 (encerrada)",
     "voltou": "Voltou ao rmatr029",
+    "reaberta": "Atendida desfeita (continua sem pedido)",
 }
 EVENTO_ICONE = {
     "emitida": "🧾", "distribuida": "👤", "redistribuida": "🔁", "pedido": "🛒",
-    "entregue": "📦", "status": "🔒", "saiu": "✅", "voltou": "↩️",
+    "entregue": "📦", "status": "🔒", "saiu": "✅", "voltou": "↩️", "reaberta": "⚠️",
 }
 
 
@@ -315,3 +316,32 @@ def importar_inicial(banco, caminho) -> dict | None:
     return {"status": "gravado",
             "mensagem": f"Historico inicial importado: {len(dados['itens'])} SC-itens, "
                         f"{len(evs)} eventos ({len(mapa)} extracoes antigas)."}
+
+
+def reabrir_atendidas(store, banco, model: pd.DataFrame, ref_sc: str) -> list[dict]:
+    """SC marcada como 'Atendida' que continua SEM pedido numa extracao mais nova
+    (de um dia depois da marcacao) = o pedido nao foi efetivado no Protheus.
+    Desfaz a marcacao, registra no log e na linha do tempo. Devolve as reabertas."""
+    acomp = store.carregar()
+    if acomp.empty:
+        return []
+    ref = pd.Timestamp(ref_sc)
+    sem_pedido = set(model.loc[~model["com_pedido"].astype(bool), "chave"])
+    reabertas = []
+    for _, r in acomp[acomp["atendida"].astype(bool)].iterrows():
+        dt = pd.to_datetime(r.get("atendida_em"), errors="coerce")
+        if r["chave"] not in sem_pedido or pd.isna(dt) or dt.normalize() >= ref:
+            continue  # tem pedido, ou a marcacao e do mesmo dia/depois da extracao
+        obs = (f"Marcada como atendida por {r.get('atendida_por') or '?'} em {dt:%d/%m}, "
+               f"mas continua sem pedido no rmatr029 de {ref:%d/%m}")
+        store.reabrir(r["chave"], obs)
+        reabertas.append({"chave": r["chave"], "obs": obs})
+    if reabertas and banco is not None:
+        agora = _agora()
+        banco.insert("sc_acompanhamento_log", [{
+            "chave": x["chave"], "campo": "atendida", "valor_antigo": "True",
+            "valor_novo": "False", "usuario": "automatico", "em": agora} for x in reabertas])
+        banco.insert("sc_evento", [{
+            "chave": x["chave"], "evento": "reaberta", "data": ref_sc, "detalhe": x["obs"],
+            "carga_id": None, "criado_em": agora} for x in reabertas])
+    return reabertas
