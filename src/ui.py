@@ -128,6 +128,10 @@ section[data-testid="stSidebar"] {{ background: #f3f5f8; }}
   border: 1px solid #f5d49a; border-radius: 8px; padding: 5px 9px; }}
 div[class*="st-key-sc-reab-"] {{ border-left-color: {ALERTA} !important; }}
 .bdg.local {{ background: #eaf2fc; color: #1c5cab; border-color: #c7dcf5; }}
+.bdg.stt {{ background: #f1ecfb; color: #5b3a9e; border-color: #d9cdf3; }}
+.sc-cod {{ font-family: ui-monospace, Consolas, monospace; font-size: .86rem;
+  font-weight: 600; color: #1c5cab; background: #eaf2fc; border-radius: 6px;
+  padding: 1px 7px; margin-right: 8px; }}
 div[class*="st-key-sc-"] {{ border-left: 5px solid #c3c2b7 !important;
   transition: background .15s; }}
 div[class*="st-key-sc-normal-"] {{ border-left-color: {AZUL} !important; }}

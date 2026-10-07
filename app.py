@@ -45,7 +45,7 @@ def _demo() -> dict:
 
 # Mudou a regra de leitura/cruzamento? Troque a versao: invalida o cache antigo
 # (o cache do Streamlit so enxerga o codigo da propria funcao, nao o de src/).
-VERSAO_MOTOR = "2026-10-07a"
+VERSAO_MOTOR = "2026-10-07b"
 
 
 @st.cache_data(show_spinner="Identificando os arquivos...", max_entries=5)
@@ -147,7 +147,7 @@ CFG_BANCO = _hl.sha1(f"{SEGREDOS.get('supabase_url', '')}|{SEGREDOS.get('supabas
 
 
 @st.cache_resource
-def _store_persistente(cfg: str):
+def _store_persistente(cfg: str, versao: str = ""):
     return st_store.criar(SEGREDOS, demo=False, raiz=Path(__file__).parent)
 
 
@@ -327,7 +327,7 @@ if modo_demo:
         st.session_state["_store_demo"] = st_store.criar(None, demo=True, raiz=Path("."))
     store = st.session_state["_store_demo"]
 else:
-    store = _store_persistente(CFG_BANCO)
+    store = _store_persistente(CFG_BANCO, VERSAO_MOTOR)
 
 try:
     acomp = store.carregar()
@@ -337,10 +337,13 @@ except Exception as e:  # noqa: BLE001
 
 # Garante todas as colunas, mesmo se o store em cache for de uma versao antiga
 # do app (sem reaberta_em / reaberta_obs) ou se o banco ainda nao tiver a coluna.
-acomp = acomp.reindex(columns=st_store.COLS)
+# "status" ja existe no modelo (situacao da SC); no app o campo vira "andamento"
+REN_ACOMP = {"status": "andamento", "status_por": "andamento_por",
+             "status_em": "andamento_em"}
+acomp = acomp.reindex(columns=st_store.COLS).rename(columns=REN_ACOMP)
 
 COLS_ACOMP = ["chave", "atendida", "atendida_por", "atendida_em", "onde_encontrar",
-              "reaberta_em", "reaberta_obs"]
+              "reaberta_em", "reaberta_obs", "andamento", "andamento_por", "andamento_em"]
 model = model.merge(acomp[COLS_ACOMP], on="chave", how="left")
 model["atendida"] = model["atendida"].fillna(False).astype(bool)
 
@@ -540,7 +543,7 @@ tabs = st.tabs(on_change="rerun", key="aba", tabs=[
 (tab_geral, tab_alertas, tab1, tab2, tab3, tab4, tab5, tab_hist, tab6) = tabs
 
 COLS_SC = [
-    "NUM.SC", "ITEM", "tipo_cod", "DESCRICAO", "QTD", "VALOR",
+    "NUM.SC", "ITEM", "tipo_cod", "PRODUTO", "DESCRICAO", "QTD", "VALOR",
     "DT_EMISSAO", "idade_dias", "DT_NECESSIDADE", "URGENCIA", "responsavel",
     "SOLICITANTE", "DESC_DEPARTAMENTO", "APROVADO", "LEGENDA",
 ]
@@ -563,6 +566,7 @@ def _preparar(df: pd.DataFrame, extra: list | None = None) -> pd.DataFrame:
         "DT_NECESSIDADE": "NECESSIDADE", "dias_atraso": "ATRASO (dias)",
         "responsavel": "RESPONSAVEL", "DESC_DEPARTAMENTO": "DEPARTAMENTO",
         "atendida": "ATENDIDA", "onde_encontrar": "ONDE ENCONTRAR",
+        "andamento": "STATUS", "PRODUTO": "COD. PRODUTO",
         "reaberta_obs": "POR QUE VOLTOU",
     })
 
@@ -748,18 +752,23 @@ def _aba_backlog():
         acomp_f = store.carregar()
     except Exception:  # noqa: BLE001
         acomp_f = acomp
-    acomp_f = acomp_f.reindex(columns=st_store.COLS)
+    acomp_f = acomp_f.reindex(columns=st_store.COLS).rename(columns=REN_ACOMP)
     backlog = mf_base[~mf_base["com_pedido"]].merge(
         acomp_f[COLS_ACOMP], on="chave", how="left")
     backlog["atendida"] = backlog["atendida"].fillna(False).astype(bool)
     locais = sorted(acomp_f["onde_encontrar"].dropna().unique().tolist())
+    status_opts = st_store.STATUS_PADRAO + sorted(
+        set(acomp_f["andamento"].dropna().unique()) - set(st_store.STATUS_PADRAO))
 
-    f1, f2, f3 = st.columns([3, 3, 3])
+    f1, f2, f3, f3b = st.columns([3, 3, 3, 3])
     resp_opts = sorted([r for r in backlog["responsavel"].dropna().unique()])
     f_resp = f1.multiselect("Responsavel", resp_opts, key="bl_resp", placeholder="Todos")
     f_onde = f2.multiselect("Onde encontrar", ["(nao definido)"] + locais,
                             key="bl_onde", placeholder="Todos os locais")
-    f_busca = f3.text_input("Buscar (descricao, SC, solicitante)", key="bl_busca")
+    f_status = f3.multiselect("Status", ["(sem status)"] + status_opts, key="bl_status",
+                              placeholder="Todos os status")
+    f_busca = f3b.text_input("Buscar (descricao, codigo, SC, solicitante)",
+                             key="bl_busca")
     f4, f5, f6, f7 = st.columns([4, 2, 2, 2])
     f_sit = f4.segmented_control(
         "Situacao", ["Pendentes", "Atendidas", "Desfeitas", "Todas"], default="Todas",
@@ -776,6 +785,9 @@ def _aba_backlog():
     if f_onde:
         sem_local = "(nao definido)" in f_onde
         b = b[b["onde_encontrar"].isin(f_onde) | (sem_local & b["onde_encontrar"].isna())]
+    if f_status:
+        sem_st = "(sem status)" in f_status
+        b = b[b["andamento"].isin(f_status) | (sem_st & b["andamento"].isna())]
     if f_sit == "Pendentes":
         b = b[~b["atendida"]]
     elif f_sit == "Atendidas":
@@ -787,7 +799,8 @@ def _aba_backlog():
     if f_venc:
         b = b[b["vencida"]]
     if f_busca:
-        alvo_txt = (b["DESCRICAO"].astype(str) + " " + b["NUM.SC"].astype(str) + " "
+        alvo_txt = (b["DESCRICAO"].astype(str) + " " + b["PRODUTO"].astype(str) + " "
+                    + b["NUM.SC"].astype(str) + " "
                     + b["SOLICITANTE"].astype(str))
         b = b[alvo_txt.str.contains(f_busca, case=False, na=False, regex=False)]
     ORDENS = {
@@ -811,8 +824,8 @@ def _aba_backlog():
          "sub": "ainda nao marcadas"},
         {"rot": "Atendidas", "val": ui.num(n_at), "cor": ui.BOM,
          "sub": "marcadas pela equipe"},
-        {"rot": "Sem local definido", "val": ui.num(b["onde_encontrar"].isna().sum()),
-         "cor": ui.AZUL_ESCURO, "sub": "campo 'Onde encontrar' vazio"},
+        {"rot": "Em cotação", "val": ui.num((b["andamento"] == "Em cotação").sum()),
+         "cor": ui.AZUL_ESCURO, "sub": "enviadas para cotacao"},
     ])
 
     if usuario is None:
@@ -822,7 +835,7 @@ def _aba_backlog():
     def _salvar(chave: str, campo: str):
         chave_w = f"{campo}_{chave}"
         valor = st.session_state.get(chave_w)
-        col = "atendida" if campo == "at" else "onde_encontrar"
+        col = {"at": "atendida", "onde": "onde_encontrar", "st": "andamento"}[campo]
         lin = acomp_f[acomp_f["chave"] == chave]
         antigo = lin.iloc[0][col] if len(lin) else None
         try:
@@ -830,6 +843,12 @@ def _aba_backlog():
                 novo = bool(valor)
                 store.salvar(chave, usuario or "?", atendida=novo)
                 antigo = bool(antigo) if antigo is not None and pd.notna(antigo) else False
+            elif campo == "st":
+                novo = None if (not valor or valor == SEM_STATUS) else " ".join(str(valor).split())
+                store.salvar(chave, usuario or "?", status=novo or "")
+                if novo is None:
+                    st.session_state[chave_w] = SEM_STATUS
+                antigo = antigo if antigo is not None and pd.notna(antigo) else None
             else:
                 novo = " ".join(str(valor).split()).upper() if valor else None
                 store.salvar(chave, usuario or "?", onde=valor or "")
@@ -844,6 +863,8 @@ def _aba_backlog():
             st.toast("Salvo ✓", icon="💾")
         except Exception as e:  # noqa: BLE001
             st.toast(f"Erro ao salvar: {e}", icon="⚠️")
+
+    SEM_STATUS = "— Sem status —"
 
     def _fmt(d):
         return pd.Timestamp(d).strftime("%d/%m/%Y") if pd.notna(d) else "-"
@@ -866,6 +887,14 @@ def _aba_backlog():
                 badges.append(f'<span class="bdg venc">⏰ Vencida ha {int(r["dias_atraso"])} d</span>')
             if r["urgente"]:
                 badges.append('<span class="bdg urg">🔥 Urgencia ALTA</span>')
+            if pd.notna(r.get("andamento")) and r.get("andamento"):
+                dias_st = ""
+                if pd.notna(r.get("andamento_em")) and r.get("andamento_em"):
+                    _d = (pd.Timestamp.now().normalize()
+                          - pd.Timestamp(r["andamento_em"]).tz_localize(None).normalize()).days
+                    dias_st = " · hoje" if _d <= 0 else f" · ha {_d} d"
+                badges.insert(0, f'<span class="bdg stt">🏷️ {_html.escape(str(r["andamento"]))}'
+                                 f'{dias_st}</span>')
             if pd.notna(r["onde_encontrar"]) and r["onde_encontrar"]:
                 badges.append(f'<span class="bdg local">📍 {_html.escape(r["onde_encontrar"])}</span>')
             reaberta = (not r["atendida"]) and pd.notna(r.get("reaberta_em")) \
@@ -880,7 +909,8 @@ def _aba_backlog():
                 f'<div class="sc-top"><span class="sc-num">SC {_html.escape(str(r["NUM.SC"]))}'
                 f'<span class="sc-item"> · item {_html.escape(str(r["ITEM"]))}</span></span>'
                 f'{"".join(badges)}</div>'
-                f'<div class="sc-desc">{_html.escape(str(r["DESCRICAO"]))}</div>'
+                f'<div class="sc-desc"><span class="sc-cod">{_html.escape(str(r["PRODUTO"]) if pd.notna(r["PRODUTO"]) and r["PRODUTO"] else "-")}</span>'
+                f'{_html.escape(str(r["DESCRICAO"]))}</div>'
                 f'<div class="sc-meta">'
                 f'<span><b>{r["QTD"]:g}</b> un</span>'
                 f'<span><b>{ui.brl(r["VALOR"])}</b></span>'
@@ -892,7 +922,13 @@ def _aba_backlog():
                 f"</div>{aviso_reab}</div>",
                 unsafe_allow_html=True,
             )
-            k_at, k_onde = f"at_{chave}", f"onde_{chave}"
+            k_at, k_onde, k_st = f"at_{chave}", f"onde_{chave}", f"st_{chave}"
+            if k_st not in st.session_state:
+                st.session_state[k_st] = (r["andamento"] if pd.notna(r.get("andamento"))
+                                          and r.get("andamento") else SEM_STATUS)
+            opcoes_st = [SEM_STATUS] + status_opts + (
+                [st.session_state[k_st]] if st.session_state[k_st] not in
+                [SEM_STATUS] + status_opts else [])
             if k_at not in st.session_state:
                 st.session_state[k_at] = bool(r["atendida"])
             if k_onde not in st.session_state:
@@ -903,12 +939,15 @@ def _aba_backlog():
                                else [])
             c_acao.checkbox("✅ Atendida", key=k_at, on_change=_salvar, args=(chave, "at"))
             c_acao.selectbox(
+                "🏷️ Status", opcoes_st, key=k_st, accept_new_options=True,
+                on_change=_salvar, args=(chave, "st"), label_visibility="collapsed")
+            c_acao.selectbox(
                 "📍 Onde encontrar", opcoes, key=k_onde, accept_new_options=True,
                 placeholder="Digite ou escolha...", on_change=_salvar, args=(chave, "onde"),
                 label_visibility="collapsed")
 
     if ver_tabela:
-        tabela_sc(b, extra=["atendida", "onde_encontrar"], altura=520)
+        tabela_sc(b, extra=["andamento", "atendida", "onde_encontrar"], altura=520)
     elif b.empty:
         ui.alerta("ok", "✅", "Nenhuma SC neste filtro")
     else:
@@ -930,7 +969,7 @@ def _aba_backlog():
         else:
             n_pag = max(1, -(-len(b) // POR_PAGINA))
             # volta para a pagina 1 quando filtro/ordem mudam
-            assinatura = (tuple(f_resp), tuple(f_onde), f_busca, f_sit, f_urg, f_venc,
+            assinatura = (tuple(f_resp), tuple(f_onde), tuple(f_status), f_busca, f_sit, f_urg, f_venc,
                           ordem_sel, len(b))
             if st.session_state.get("_bl_assin") != assinatura:
                 st.session_state["_bl_assin"] = assinatura
@@ -982,7 +1021,7 @@ def _aba_backlog():
                 cartao(r)
             paginacao("rodape")
 
-    baixar_csv(b[COLS_SC + ["atendida", "atendida_por", "onde_encontrar"]],
+    baixar_csv(b[COLS_SC + ["andamento", "atendida", "atendida_por", "onde_encontrar"]],
                "backlog_a_atender.csv", "⬇️ Baixar lista (CSV)")
 
 
@@ -1206,6 +1245,9 @@ def linha_do_tempo(chave: str):
             txt = "Marcada como atendida" if lg["valor_novo"] in ("True", "true", "1") \
                 else "Desmarcada como atendida"
             ico = "✅"
+        elif lg["campo"] == "status":
+            txt = f"Status: {lg['valor_antigo'] or '-'} → {lg['valor_novo'] or '-'}"
+            ico = "🏷️"
         else:
             txt = f"Onde encontrar: {lg['valor_antigo'] or '-'} → {lg['valor_novo'] or '-'}"
             ico = "📍"

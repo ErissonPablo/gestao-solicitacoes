@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Acompanhamento manual por SC-item: 'Atendida' e 'Onde encontrar'.
+"""Acompanhamento manual por SC-item: 'Atendida', 'Onde encontrar' e 'Status'.
 
 As marcacoes ficam salvas pela chave SC-ITEM ('052507-0008'), entao
 sobrevivem a cada nova subida das planilhas do Protheus.
@@ -22,7 +22,11 @@ from pathlib import Path
 import pandas as pd
 
 COLS = ["chave", "atendida", "atendida_por", "atendida_em", "onde_encontrar",
-        "atualizado_por", "atualizado_em", "reaberta_em", "reaberta_obs"]
+        "atualizado_por", "atualizado_em", "reaberta_em", "reaberta_obs",
+        "status", "status_por", "status_em"]
+# Status do andamento de cada SC-item (a equipe pode digitar outros)
+STATUS_PADRAO = ["Em cotação", "Cotação recebida", "Aguardando aprovação",
+                 "Aguardando solicitante"]
 USUARIO_AUTOMATICO = "automatico"
 TABELA = "sc_acompanhamento"
 
@@ -35,7 +39,8 @@ def _vazio() -> pd.DataFrame:
     return pd.DataFrame(columns=COLS)
 
 
-def _campos_salvar(atendida, onde, usuario, anterior: dict | None) -> dict:
+def _campos_salvar(atendida, onde, usuario, anterior: dict | None,
+                   status=None) -> dict:
     """Monta o registro completo, preservando o que nao mudou."""
     reg = dict(anterior or {})
     if atendida is not None:
@@ -48,6 +53,12 @@ def _campos_salvar(atendida, onde, usuario, anterior: dict | None) -> dict:
     if onde is not None:
         onde = " ".join(str(onde).split()).strip()
         reg["onde_encontrar"] = onde.upper() or None
+    if status is not None:
+        status = " ".join(str(status).split()).strip() or None
+        if status != reg.get("status"):
+            reg["status"] = status
+            reg["status_por"] = usuario if status else None
+            reg["status_em"] = _agora() if status else None
     reg["atualizado_por"] = usuario
     reg["atualizado_em"] = _agora()
     reg.setdefault("atendida", False)
@@ -75,8 +86,9 @@ class MemoriaStore:
             return _vazio()
         return pd.DataFrame([{"chave": k, **v} for k, v in self._d.items()])[COLS]
 
-    def salvar(self, chave: str, usuario: str, atendida=None, onde=None):
-        self._d[chave] = _campos_salvar(atendida, onde, usuario, self._d.get(chave))
+    def salvar(self, chave: str, usuario: str, atendida=None, onde=None, status=None):
+        self._d[chave] = _campos_salvar(atendida, onde, usuario, self._d.get(chave),
+                                        status)
 
     def reabrir(self, chave: str, obs: str):
         self._d[chave] = _campos_reabrir(self._d.get(chave), obs)
@@ -95,7 +107,8 @@ class SQLiteStore:
                 atendida_por TEXT, atendida_em TEXT, onde_encontrar TEXT,
                 atualizado_por TEXT, atualizado_em TEXT)""")
             existentes = {r[1] for r in c.execute(f"PRAGMA table_info({TABELA})")}
-            for col in ("reaberta_em", "reaberta_obs"):
+            for col in ("reaberta_em", "reaberta_obs", "status", "status_por",
+                        "status_em"):
                 if col not in existentes:
                     c.execute(f"ALTER TABLE {TABELA} ADD COLUMN {col} TEXT")
 
@@ -108,12 +121,12 @@ class SQLiteStore:
         df["atendida"] = df["atendida"].fillna(0).astype(bool)
         return df
 
-    def salvar(self, chave: str, usuario: str, atendida=None, onde=None):
+    def salvar(self, chave: str, usuario: str, atendida=None, onde=None, status=None):
         with self._con() as c:
             row = c.execute(f"SELECT {', '.join(COLS)} FROM {TABELA} WHERE chave=?",
                             (chave,)).fetchone()
             anterior = dict(zip(COLS, row)) if row else None
-            reg = _campos_salvar(atendida, onde, usuario, anterior)
+            reg = _campos_salvar(atendida, onde, usuario, anterior, status)
             self._gravar(c, chave, reg)
 
     def reabrir(self, chave: str, obs: str):
@@ -159,12 +172,12 @@ class SupabaseStore:
         df["atendida"] = df["atendida"].fillna(False).astype(bool)
         return df
 
-    def salvar(self, chave: str, usuario: str, atendida=None, onde=None):
+    def salvar(self, chave: str, usuario: str, atendida=None, onde=None, status=None):
         r = self._s.get(self._url, params={"select": ",".join(COLS),
                                            "chave": f"eq.{chave}"}, timeout=15)
         r.raise_for_status()
         anterior = r.json()[0] if r.json() else None
-        self._gravar(chave, _campos_salvar(atendida, onde, usuario, anterior))
+        self._gravar(chave, _campos_salvar(atendida, onde, usuario, anterior, status))
 
     def reabrir(self, chave: str, obs: str):
         r = self._s.get(self._url, params={"select": ",".join(COLS),
