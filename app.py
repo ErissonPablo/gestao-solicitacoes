@@ -45,7 +45,7 @@ def _demo() -> dict:
 
 # Mudou a regra de leitura/cruzamento? Troque a versao: invalida o cache antigo
 # (o cache do Streamlit so enxerga o codigo da propria funcao, nao o de src/).
-VERSAO_MOTOR = "2026-09-28b"
+VERSAO_MOTOR = "2026-10-07a"
 
 
 @st.cache_data(show_spinner="Identificando os arquivos...", max_entries=5)
