@@ -506,6 +506,26 @@ ui.kpis([
      "sub": f"<b>{ui.num(pend['chegou_fabrica'].sum())}</b> ja chegaram (pre nota)"},
 ])
 
+# Aviso: SCs mais novas que a ultima SC da planilha de distribuicao = a planilha
+# baixada esta atrasada (ainda nao tem a distribuicao delas) -> ficam sem dono e
+# somem do filtro por comprador.
+_num = pd.to_numeric(model["NUM.SC"], errors="coerce")
+_ult_dist = _num[model["distribuida"]].max()
+if pd.notna(_ult_dist):
+    _novas = model[(~model["distribuida"]) & (~model["com_pedido"]) & (_num > _ult_dist)
+                   & model["APROVADO"].fillna("").str.upper().eq("APROVADA")]
+    if len(_novas):
+        _nums = sorted(_novas["NUM.SC"].astype(str).unique())
+        _faixa = _nums[0] if len(_nums) == 1 else f"{_nums[0]} a {_nums[-1]}"
+        ui.alerta(
+            "serio", "⚠️",
+            f"{len(_novas)} SC-itens mais novos que a planilha de distribuicao ainda estao "
+            f"sem responsavel (SCs {_faixa})",
+            f"A distribuicao que foi subida vai so ate a SC {int(_ult_dist):06d}. Enquanto ela "
+            "nao for atualizada, essas SCs nao aparecem no filtro por comprador - estao na "
+            "aba ⚠️ Sem distribuicao. Baixe a distribuicao de novo (depois de distribuir) e "
+            "suba em Upload de arquivos.")
+
 tabs = st.tabs(on_change="rerun", key="aba", tabs=[
     "📊 Visao geral",
     "🚨 Alertas",

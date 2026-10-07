@@ -107,9 +107,30 @@ def parse_num(x) -> float:
 # --------------------------------------------------------------------------- #
 # Loaders publicos
 # --------------------------------------------------------------------------- #
+def _bytes(path) -> bytes:
+    if hasattr(path, "getvalue"):
+        return path.getvalue()
+    if isinstance(path, (bytes, bytearray)):
+        return bytes(path)
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def _texto(df: pd.DataFrame) -> pd.DataFrame:
+    """Colunas de texto como no XML (vazio no lugar de None)."""
+    for c in df.columns:
+        if df[c].dtype == object:
+            df[c] = df[c].map(lambda v: "" if v is None else v)
+    return df
+
+
 def load_scs(path: str) -> pd.DataFrame:
-    """Solicitacoes de Compra (rmatr029)."""
-    df = _read_spreadsheetml(path, "SOLICITA")
+    """Solicitacoes de Compra (rmatr029). XML do Excel (ate set/2026) ou .xlsx."""
+    if _bytes(path)[:2] == b"PK":
+        from . import formatos
+        df = _texto(formatos.ler_tabela(_bytes(path), "sc"))
+    else:
+        df = _read_spreadsheetml(path, "SOLICITA")
     for c in ("DT.EMISSAO", "DT.LIBERACAO", "DT.NECESSIDADE", "DT.EMIS.PC"):
         if c in df.columns:
             df[c] = df[c].map(parse_data)
@@ -120,8 +141,12 @@ def load_scs(path: str) -> pd.DataFrame:
 
 
 def load_pcs(path: str) -> pd.DataFrame:
-    """Pedidos de Compra (rmatr052)."""
-    df = _read_spreadsheetml(path, "Pedido")
+    """Pedidos de Compra (rmatr052). XML do Excel ou .xlsx."""
+    if _bytes(path)[:2] == b"PK":
+        from . import formatos
+        df = _texto(formatos.ler_tabela(_bytes(path), "pc"))
+    else:
+        df = _read_spreadsheetml(path, "Pedido")
     for c in ("EMISSAO", "DATA SOLICIT"):
         if c in df.columns:
             df[c] = df[c].map(parse_data)

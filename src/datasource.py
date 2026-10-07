@@ -51,9 +51,13 @@ def classificar(nome: str, b: bytes) -> str | None:
                 hdr = _sem_acento_upper(" ".join(str(c) for c in primeira if c))
                 cabecalho_ok = "RESPONSAVEL" in hdr and "DISTRIBUI" in hdr
             wb.close()
-            return "dist" if cabecalho_ok else None
+            if cabecalho_ok:
+                return "dist"
         except Exception:  # noqa: BLE001
             return None
+        # rmatr029/rmatr052 exportados em .xlsx (a partir de out/2026)
+        from . import formatos
+        return formatos.tipo_xlsx(b)
     # SpreadsheetML (XML) -> SC ou PC
     txt = _head_text(b)
     if "<?XML" in txt or "WORKBOOK" in txt:
@@ -134,6 +138,12 @@ def data_referencia(tipo: str, b: bytes, mtime: float | None) -> float:
         ref = _ultima_distribuicao(b)
         if ref is not None:
             return ref
+    if tipo in ("sc", "pc") and b[:2] == b"PK":  # relatorio em .xlsx: aba de parametros
+        from . import formatos
+        dt = formatos.dt_ref_parametros(b)
+        if dt is not None:
+            return dt.timestamp()
+        return mtime if mtime is not None else 0.0
     if tipo in ("sc", "pc"):
         txt = _head_text(b)
         m = re.search(r"(?:EMISSAO|DT\.REF)[:\s]*([0-3]?\d/[0-1]?\d/\d{4})", txt)
