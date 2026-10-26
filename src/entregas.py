@@ -25,7 +25,7 @@ import pandas as pd
 COLS_PREV = ["pedido", "nova_previsao", "obs", "fonte", "atualizado_por", "atualizado_em"]
 COLS_EMAIL = ["id", "message_id", "pedido", "tipo", "recebido_em", "remetente",
               "remetente_nome", "fornecedor", "assunto", "resumo", "nf", "previsao",
-              "situacao", "link"]
+              "situacao", "link", "corpo"]
 
 _PALAVRAS_VAZIAS = {"LTDA", "ME", "EPP", "EIRELI", "SA", "S/A", "S.A", "IND", "INDUSTRIA",
                     "COM", "COMERCIO", "E", "DE", "DO", "DA", "DOS", "DAS", "EM", "LTD",
@@ -92,6 +92,8 @@ def carregar_previsoes(banco) -> pd.DataFrame:
 def carregar_emails(banco) -> pd.DataFrame:
     rows = banco.select("pedido_email", colunas=COLS_EMAIL) if banco is not None else []
     df = pd.DataFrame(rows, columns=COLS_EMAIL)
+    # data combinada no pedido nao conta: a previsao vem do fornecedor/transportadora
+    df = df[df["tipo"].fillna("") != "pedido"].reset_index(drop=True)
     df["pedido"] = df["pedido"].map(norm_pedido)
     df["nf_n"] = df["nf"].map(norm_nf)
     df["recebido_em"] = pd.to_datetime(df["recebido_em"], errors="coerce", utc=True) \
@@ -200,5 +202,6 @@ def resumo_por_pedido(pedidos: pd.DataFrame, previsoes: pd.DataFrame,
     r["atrasado"] = r["previsao"].notna() & (r["dias_para_previsao"] < 0) & ~r["chegou"]
     r["vence_logo"] = r["previsao"].notna() & r["dias_para_previsao"].between(0, 3) \
         & ~r["chegou"]
-    r["sem_retorno"] = (r["n_emails"] == 0) & r["previsao"].isna() & ~r["chegou"]
+    # previsao pendente: ninguem informou data (nem e-mail, nem manual)
+    r["sem_retorno"] = r["previsao"].isna() & ~r["chegou"]
     return r

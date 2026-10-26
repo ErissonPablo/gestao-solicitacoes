@@ -46,7 +46,7 @@ ESQUEMA = {
         "pk": "message_id",
         "cols": ["id", "message_id", "pedido", "tipo", "recebido_em", "remetente",
                  "remetente_nome", "fornecedor", "assunto", "resumo", "nf", "previsao",
-                 "situacao", "link", "criado_em"],
+                 "situacao", "link", "criado_em", "corpo"],
     },
     "sc_acompanhamento_log": {
         "pk": "id",
@@ -95,11 +95,14 @@ class SQLiteBanco:
               id INTEGER PRIMARY KEY AUTOINCREMENT, message_id TEXT UNIQUE, pedido TEXT,
               tipo TEXT, recebido_em TEXT, remetente TEXT, remetente_nome TEXT,
               fornecedor TEXT, assunto TEXT, resumo TEXT, nf TEXT, previsao TEXT,
-              situacao TEXT, link TEXT, criado_em TEXT);
+              situacao TEXT, link TEXT, criado_em TEXT, corpo TEXT);
             """)
             cols_carga = {r[1] for r in c.execute("PRAGMA table_info(carga)")}
             if "storage" not in cols_carga:
                 c.execute("ALTER TABLE carga ADD COLUMN storage TEXT")
+            cols_mail = {r[1] for r in c.execute("PRAGMA table_info(pedido_email)")}
+            if "corpo" not in cols_mail:
+                c.execute("ALTER TABLE pedido_email ADD COLUMN corpo TEXT")
 
     def _con(self):
         c = sqlite3.connect(self.caminho, timeout=15)

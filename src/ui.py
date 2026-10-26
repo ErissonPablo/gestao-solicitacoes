@@ -133,6 +133,11 @@ div[class*="st-key-sc-reab-"] {{ border-left-color: {ALERTA} !important; }}
 .mail-top {{ font-size: .8rem; color: #52514e; }}
 .mail-ass {{ font-weight: 600; font-size: .9rem; color: #1f2a37; }}
 .mail-res {{ font-size: .85rem; color: #3a3a37; white-space: pre-line; }}
+.mail-corpo {{ font-size: .85rem; color: #1f2a37; white-space: pre-line; max-height: 320px;
+  overflow-y: auto; background: #fafaf8; border: 1px solid #ecebe6; border-radius: 6px;
+  padding: 6px 9px; margin-top: 4px; }}
+div[data-testid="stPopoverBody"] {{ width: min(680px, 92vw); max-height: 70vh;
+  overflow-y: auto; }}
 .bdg.stt {{ background: #f1ecfb; color: #5b3a9e; border-color: #d9cdf3; }}
 .sc-cod {{ font-family: ui-monospace, Consolas, monospace; font-size: .86rem;
   font-weight: 600; color: #1c5cab; background: #eaf2fc; border-radius: 6px;

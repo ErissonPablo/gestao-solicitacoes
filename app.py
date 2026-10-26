@@ -1174,10 +1174,11 @@ def _aba_entregas():
     f_comp = pcols[0].multiselect("Comprador", comp_opts, key="ent_comp", placeholder="Todos")
     forn_busca = pcols[1].text_input("Fornecedor ou pedido", key="ent_forn")
     f_sit = pcols[2].segmented_control(
-        "Mostrar", ["Todos", "Atrasados", "Vencem em 3 dias", "Sem retorno"],
+        "Mostrar", ["Todos", "Previsao pendente", "Atrasados", "Vencem em 3 dias"],
         default="Todos", key="ent_sit",
         help="Atrasados: a previsao (nova ou do e-mail) ja passou. "
-             "Sem retorno: nenhum e-mail ligado e nenhuma previsao informada.")
+             "Previsao pendente: ainda sem data de entrega informada pelo "
+             "fornecedor (por e-mail) nem digitada.")
     ocultar_prenota = pcols[3].checkbox(
         "Ocultar o que ja chegou (pre nota)", key="ent_prenota", value=True,
         help="Pre nota = ja chegou na fabrica, falta so lancar a nota fiscal.")
@@ -1200,14 +1201,14 @@ def _aba_entregas():
          "sub": "previsao ja passou"},
         {"rot": "Vencem em 3 dias", "val": ui.num(r["vence_logo"].sum()), "cor": ui.LARANJA,
          "sub": "previsao chegando"},
-        {"rot": "Sem retorno", "val": ui.num(r["sem_retorno"].sum()),
-         "cor": ui.AZUL_ESCURO, "sub": "sem e-mail nem previsao"},
+        {"rot": "Previsao pendente", "val": ui.num(r["sem_retorno"].sum()),
+         "cor": ui.AZUL_ESCURO, "sub": "pedir data ao fornecedor"},
     ])
     if f_sit == "Atrasados":
         r = r[r["atrasado"]]
     elif f_sit == "Vencem em 3 dias":
         r = r[r["vence_logo"]]
-    elif f_sit == "Sem retorno":
+    elif f_sit == "Previsao pendente":
         r = r[r["sem_retorno"]]
     # atrasados primeiro, depois quem vence antes, depois os mais antigos
     r = r.assign(_o=r["dias_para_previsao"].fillna(9999)).sort_values(
@@ -1256,7 +1257,7 @@ def _aba_entregas():
                 d = int(x["dias_para_previsao"])
                 bd.append(f'<span class="bdg urg">{"Chega hoje" if d == 0 else f"Vence em {d} d"}</span>')
             if x["sem_retorno"]:
-                bd.append('<span class="bdg reab">Sem retorno do fornecedor</span>')
+                bd.append('<span class="bdg reab">📅 Previsao pendente</span>')
             if x["n_emails"]:
                 bd.append(f'<span class="bdg stt">✉️ {int(x["n_emails"])} e-mail(s)</span>')
             linhas = "".join(
@@ -1286,31 +1287,40 @@ def _aba_entregas():
                                             if pd.notna(x["previsao"]) else None)
             if k_obs not in st.session_state:
                 st.session_state[k_obs] = x["obs"] if pd.notna(x.get("obs")) and x.get("obs") else ""
-            c_acao.date_input("📅 Nova previsao", key=k_prev, format="DD/MM/YYYY")
+            ev = emails_v[emails_v["pedido_vinc"] == ped].sort_values(
+                "recebido_em", ascending=False) if not emails_v.empty else emails_v
+            lg = logs[logs["pedido"].map(ent.norm_pedido) == ped] if not logs.empty else logs
+            c_dt, c_mail = c_acao.columns([4, 1.4], gap="small", vertical_alignment="bottom")
+            c_dt.date_input("📅 Nova previsao", key=k_prev, format="DD/MM/YYYY")
+            with c_mail.popover(f"✉️ {len(ev)}" if len(ev) else "✉️", disabled=not len(ev),
+                                help="Ver os e-mails deste pedido" if len(ev)
+                                else "Nenhum e-mail ligado a este pedido ainda"):
+                st.markdown(f"**E-mails do pedido {ped}** · {len(ev)}")
+                for _, m in ev.iterrows():
+                    prev_t = (f" · <b>previsao {_f(m['previsao'], '%d/%m')}</b>"
+                              if pd.notna(m["previsao"]) else "")
+                    como = {"nf": " · ligado pela NF", "fornecedor":
+                            " · ligado pelo nome do fornecedor"}.get(m["como"], "")
+                    link = (f' · <a href="{_html.escape(str(m["link"]))}" target="_blank">'
+                            "abrir no Outlook</a>") if m.get("link") else ""
+                    corpo = m.get("corpo")
+                    texto = corpo if isinstance(corpo, str) and corpo.strip() else (m["resumo"] or "")
+                    st.markdown(
+                        f'<div class="mail-it"><div class="mail-top">'
+                        f'{_f(m["recebido_em"], "%d/%m %H:%M")} · '
+                        f'<b>{_html.escape(str(m["remetente_nome"] or m["remetente"] or "-"))}</b>'
+                        f'{prev_t}{como}{link}</div>'
+                        f'<div class="mail-ass">{_html.escape(str(m["assunto"] or ""))}</div>'
+                        + (f'<div class="mail-res"><i>{_html.escape(str(m["resumo"]))}</i></div>'
+                           if m.get("resumo") and texto != m["resumo"] else "")
+                        + f'<div class="mail-corpo">{_html.escape(str(texto))}</div></div>',
+                        unsafe_allow_html=True)
             c_acao.text_input("Observacao", key=k_obs, placeholder="ex.: fornecedor atrasou",
                               label_visibility="collapsed")
             c_acao.button("Salvar previsao", key=f"salv_{ped}", width="stretch",
                           on_click=_salvar_prev, args=(ped, x["previsao"]))
-            ev = emails_v[emails_v["pedido_vinc"] == ped].sort_values(
-                "recebido_em", ascending=False) if not emails_v.empty else emails_v
-            lg = logs[logs["pedido"].map(ent.norm_pedido) == ped] if not logs.empty else logs
-            if len(ev) or len(lg):
-                with st.expander(f"✉️ E-mails ({len(ev)}) e historico da previsao ({len(lg)})"):
-                    for _, m in ev.iterrows():
-                        prev_t = (f" · <b>previsao {_f(m['previsao'], '%d/%m')}</b>"
-                                  if pd.notna(m["previsao"]) else "")
-                        como = {"nf": " · ligado pela NF", "fornecedor":
-                                " · ligado pelo nome do fornecedor"}.get(m["como"], "")
-                        link = (f' · <a href="{_html.escape(str(m["link"]))}" target="_blank">'
-                                "abrir no Outlook</a>") if m.get("link") else ""
-                        st.markdown(
-                            f'<div class="mail-it"><div class="mail-top">'
-                            f'{_f(m["recebido_em"], "%d/%m %H:%M")} · '
-                            f'<b>{_html.escape(str(m["remetente_nome"] or m["remetente"] or "-"))}</b>'
-                            f'{prev_t}{como}{link}</div>'
-                            f'<div class="mail-ass">{_html.escape(str(m["assunto"] or ""))}</div>'
-                            f'<div class="mail-res">{_html.escape(str(m["resumo"] or ""))}</div>'
-                            "</div>", unsafe_allow_html=True)
+            if len(lg):
+                with st.expander(f"📅 Historico da previsao ({len(lg)})"):
                     for _, h in lg.sort_values("em", ascending=False).iterrows():
                         st.caption(f"📅 {_f(h['em'], '%d/%m %H:%M')} · {h['usuario'] or '?'}: "
                                    f"{_f(h['previsao_antiga'])} → {_f(h['previsao_nova'])}"
