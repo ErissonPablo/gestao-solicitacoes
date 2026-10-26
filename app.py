@@ -46,7 +46,7 @@ def _demo() -> dict:
 
 # Mudou a regra de leitura/cruzamento? Troque a versao: invalida o cache antigo
 # (o cache do Streamlit so enxerga o codigo da propria funcao, nao o de src/).
-VERSAO_MOTOR = "2026-10-26a"
+VERSAO_MOTOR = "2026-10-26b"
 
 
 @st.cache_data(show_spinner="Identificando os arquivos...", max_entries=5)
@@ -153,7 +153,7 @@ def _store_persistente(cfg: str, versao: str = ""):
 
 
 @st.cache_resource
-def _banco_persistente(cfg: str):
+def _banco_persistente(cfg: str, versao: str = VERSAO_MOTOR):
     return bc.criar(SEGREDOS, raiz=Path(__file__).parent)
 
 
@@ -195,7 +195,7 @@ modo_demo = fonte.startswith("Demonstracao")
 
 if fonte == FONTE_EQUIPE:
     try:
-        _b0 = _banco_persistente(CFG_BANCO)
+        _b0 = _banco_persistente(CFG_BANCO, VERSAO_MOTOR)
         carga_equipe = _ultima_publicada(_b0, CFG_BANCO, st.session_state.get("_hist_versao", 0))
         if carga_equipe:
             _dados = _baixar_publicada(_armazem_persistente(CFG_BANCO),
@@ -359,7 +359,7 @@ st.sidebar.caption(f"Marcacoes salvas em: {store.nome}")
 # --------------------------------------------------------------------------- #
 # Historico (vida de cada SC) - grava 1x por conjunto de arquivos
 # --------------------------------------------------------------------------- #
-banco = None if modo_demo else _banco_persistente(CFG_BANCO)
+banco = None if modo_demo else _banco_persistente(CFG_BANCO, VERSAO_MOTOR)
 if not modo_demo:
     if ERRO_SEGREDOS:
         st.sidebar.error("❌ Os Secrets tem erro de formato e foram ignorados "
@@ -1162,7 +1162,8 @@ def _aba_entregas():
     try:
         prev = ent.carregar_previsoes(b_ent)
         mails = ent.carregar_emails(b_ent)
-        logs = pd.DataFrame(b_ent.select("pedido_entrega_log"),
+        logs = pd.DataFrame(b_ent.select("pedido_entrega_log",
+                                         colunas=bc.ESQUEMA["pedido_entrega_log"]["cols"]),
                             columns=bc.ESQUEMA["pedido_entrega_log"]["cols"])
     except Exception as e:  # noqa: BLE001
         st.warning(f"Nao consegui ler previsoes/e-mails do banco: {e}")

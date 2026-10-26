@@ -82,7 +82,7 @@ def mesmo_fornecedor(a, b) -> bool:
 # Leitura / gravacao
 # --------------------------------------------------------------------------- #
 def carregar_previsoes(banco) -> pd.DataFrame:
-    rows = banco.select("pedido_entrega") if banco is not None else []
+    rows = banco.select("pedido_entrega", colunas=COLS_PREV) if banco is not None else []
     df = pd.DataFrame(rows, columns=COLS_PREV)
     df["pedido"] = df["pedido"].map(norm_pedido)
     df["nova_previsao"] = pd.to_datetime(df["nova_previsao"], errors="coerce")
