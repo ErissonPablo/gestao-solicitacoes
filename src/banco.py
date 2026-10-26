@@ -32,6 +32,22 @@ ESQUEMA = {
         "pk": "id",
         "cols": ["id", "chave", "evento", "data", "detalhe", "carga_id", "criado_em"],
     },
+    "pedido_entrega": {
+        "pk": "pedido",
+        "cols": ["pedido", "nova_previsao", "obs", "fonte", "atualizado_por",
+                 "atualizado_em"],
+    },
+    "pedido_entrega_log": {
+        "pk": "id",
+        "cols": ["id", "pedido", "previsao_antiga", "previsao_nova", "obs", "fonte",
+                 "usuario", "em"],
+    },
+    "pedido_email": {
+        "pk": "message_id",
+        "cols": ["id", "message_id", "pedido", "tipo", "recebido_em", "remetente",
+                 "remetente_nome", "fornecedor", "assunto", "resumo", "nf", "previsao",
+                 "situacao", "link", "criado_em"],
+    },
     "sc_acompanhamento_log": {
         "pk": "id",
         "cols": ["id", "chave", "campo", "valor_antigo", "valor_novo", "usuario",
@@ -69,6 +85,17 @@ class SQLiteBanco:
               id INTEGER PRIMARY KEY AUTOINCREMENT, chave TEXT, campo TEXT,
               valor_antigo TEXT, valor_novo TEXT, usuario TEXT, em TEXT);
             CREATE INDEX IF NOT EXISTS sc_log_chave ON sc_acompanhamento_log(chave);
+            CREATE TABLE IF NOT EXISTS pedido_entrega (
+              pedido TEXT PRIMARY KEY, nova_previsao TEXT, obs TEXT, fonte TEXT,
+              atualizado_por TEXT, atualizado_em TEXT);
+            CREATE TABLE IF NOT EXISTS pedido_entrega_log (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, pedido TEXT, previsao_antiga TEXT,
+              previsao_nova TEXT, obs TEXT, fonte TEXT, usuario TEXT, em TEXT);
+            CREATE TABLE IF NOT EXISTS pedido_email (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, message_id TEXT UNIQUE, pedido TEXT,
+              tipo TEXT, recebido_em TEXT, remetente TEXT, remetente_nome TEXT,
+              fornecedor TEXT, assunto TEXT, resumo TEXT, nf TEXT, previsao TEXT,
+              situacao TEXT, link TEXT, criado_em TEXT);
             """)
             cols_carga = {r[1] for r in c.execute("PRAGMA table_info(carga)")}
             if "storage" not in cols_carga:

@@ -128,6 +128,11 @@ section[data-testid="stSidebar"] {{ background: #f3f5f8; }}
   border: 1px solid #f5d49a; border-radius: 8px; padding: 5px 9px; }}
 div[class*="st-key-sc-reab-"] {{ border-left-color: {ALERTA} !important; }}
 .bdg.local {{ background: #eaf2fc; color: #1c5cab; border-color: #c7dcf5; }}
+.ped-it {{ font-size: .86rem; color: #3a3a37; margin: 2px 0; }}
+.mail-it {{ border-left: 3px solid #d9cdf3; padding: 4px 10px; margin: 6px 0 10px; }}
+.mail-top {{ font-size: .8rem; color: #52514e; }}
+.mail-ass {{ font-weight: 600; font-size: .9rem; color: #1f2a37; }}
+.mail-res {{ font-size: .85rem; color: #3a3a37; white-space: pre-line; }}
 .bdg.stt {{ background: #f1ecfb; color: #5b3a9e; border-color: #d9cdf3; }}
 .sc-cod {{ font-family: ui-monospace, Consolas, monospace; font-size: .86rem;
   font-weight: 600; color: #1c5cab; background: #eaf2fc; border-radius: 6px;

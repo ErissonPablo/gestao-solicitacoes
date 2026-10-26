@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from src import loaders, crossref, normalize as nz, datasource as ds  # noqa: E402
 from src import metrics as mt, ui, export, store as st_store  # noqa: E402
 from src import banco as bc, historico as hi, armazem as arm  # noqa: E402
+from src import entregas as ent  # noqa: E402
 import hashlib as _hl  # noqa: E402
 import json as _json  # noqa: E402
 import html as _html  # noqa: E402
@@ -45,7 +46,7 @@ def _demo() -> dict:
 
 # Mudou a regra de leitura/cruzamento? Troque a versao: invalida o cache antigo
 # (o cache do Streamlit so enxerga o codigo da propria funcao, nao o de src/).
-VERSAO_MOTOR = "2026-10-07b"
+VERSAO_MOTOR = "2026-10-26a"
 
 
 @st.cache_data(show_spinner="Identificando os arquivos...", max_entries=5)
@@ -771,14 +772,15 @@ def _aba_backlog():
                              key="bl_busca")
     f4, f5, f6, f7 = st.columns([4, 2, 2, 2])
     f_sit = f4.segmented_control(
-        "Situacao", ["Pendentes", "Atendidas", "Desfeitas", "Todas"], default="Todas",
-        key="bl_sit", help="Desfeitas: estavam marcadas como atendidas, mas continuaram "
+        "Situacao", ["Pendentes", "Atendidas", "Desfeitas", "Todas"], default="Pendentes",
+        key="bl_sit2", help="Desfeitas: estavam marcadas como atendidas, mas continuaram "
                            "sem pedido na planilha seguinte.")
     f_urg = f5.checkbox("Somente urgencia ALTA", key="bl_urg")
     f_venc = f6.checkbox("Somente vencidas", key="bl_venc")
     agrupar = f7.toggle("Agrupar por local", key="bl_agrupar",
                         help="Separa a lista pelos nomes de 'Onde encontrar'.")
 
+    f_sit = f_sit or "Pendentes"  # clicar de novo no botao nao mostra tudo
     b = backlog.copy()
     if f_resp:
         b = b[b["responsavel"].isin(f_resp)]
@@ -1117,77 +1119,241 @@ if tab3.open:
 # --------------------------------------------------------------------------- #
 # Tab 4 - Entregas pendentes
 # --------------------------------------------------------------------------- #
+def _banco_entregas():
+    """Banco das entregas: o compartilhado; no modo demonstracao, um arquivo local."""
+    if banco is not None:
+        return banco
+    return _banco_demo_entregas()
+
+
+@st.cache_resource
+def _banco_demo_entregas():
+    import tempfile
+    return bc.SQLiteBanco(Path(tempfile.gettempdir()) / "gsc_demo_entregas.db")
+
+
+def _pedidos_pendentes(p: pd.DataFrame) -> pd.DataFrame:
+    """1 linha por pedido a partir dos itens pendentes."""
+    if p.empty:
+        return pd.DataFrame(columns=["PEDIDO", "FORNECEDOR", "EMISSAO", "comprador",
+                                     "chegou", "algum_chegou", "n_itens", "valor_saldo",
+                                     "dias_em_aberto", "itens"])
+    q = p.assign(PEDIDO=p["PEDIDO COMPRA"].map(ent.norm_pedido),
+                 _v=p["saldo"] * pd.to_numeric(p.get("PRECO.", 0), errors="coerce").fillna(0))
+    itens = q.sort_values("ITEM").groupby("PEDIDO").apply(
+        lambda g: [(str(r["ITEM"]), str(r["PRODUTO"]), str(r["DESCRICAO."]),
+                    float(r["saldo"]), str(r.get("UM", "") or ""), bool(r["chegou_fabrica"]))
+                   for _, r in g.iterrows()], include_groups=False)
+    agg = q.groupby("PEDIDO").agg(
+        FORNECEDOR=("FORNECEDOR", "first"), EMISSAO=("EMISSAO", "min"),
+        comprador=("comprador", "first"), chegou=("chegou_fabrica", "all"),
+        algum_chegou=("chegou_fabrica", "any"), n_itens=("ITEM", "size"),
+        valor_saldo=("_v", "sum"), dias_em_aberto=("dias_em_aberto", "max"))
+    agg["itens"] = itens
+    return agg.reset_index()
+
+
 @st.fragment
 def _aba_entregas():
     ui.secao("Pedidos com entrega pendente",
-             "Itens nao encerrados com saldo a receber. Cinza (eliminado por residuo) "
-             "nao entra - e saldo cancelado.")
-    pcols = st.columns(4)
+             "Um card por pedido. Atualize a previsao de entrega e veja os e-mails do "
+             "fornecedor e da transportadora ligados a cada pedido.")
+    b_ent = _banco_entregas()
+    try:
+        prev = ent.carregar_previsoes(b_ent)
+        mails = ent.carregar_emails(b_ent)
+        logs = pd.DataFrame(b_ent.select("pedido_entrega_log"),
+                            columns=bc.ESQUEMA["pedido_entrega_log"]["cols"])
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"Nao consegui ler previsoes/e-mails do banco: {e}")
+        prev, mails = ent.carregar_previsoes(None), ent.carregar_emails(None)
+        logs = pd.DataFrame(columns=bc.ESQUEMA["pedido_entrega_log"]["cols"])
+
+    pcols = st.columns([3, 3, 3, 3])
     comp_opts = sorted([c for c in pend["comprador"].dropna().unique()])
     f_comp = pcols[0].multiselect("Comprador", comp_opts, key="ent_comp", placeholder="Todos")
-    max_idade = int(pend["dias_em_aberto"].max()) if len(pend) else 0
-    min_idade = pcols[1].slider("Idade minima (dias)", 0, max(max_idade, 1), 0)
-    forn_busca = pcols[2].text_input("Fornecedor contem", key="ent_forn")
+    forn_busca = pcols[1].text_input("Fornecedor ou pedido", key="ent_forn")
+    f_sit = pcols[2].segmented_control(
+        "Mostrar", ["Todos", "Atrasados", "Vencem em 3 dias", "Sem retorno"],
+        default="Todos", key="ent_sit",
+        help="Atrasados: a previsao (nova ou do e-mail) ja passou. "
+             "Sem retorno: nenhum e-mail ligado e nenhuma previsao informada.")
     ocultar_prenota = pcols[3].checkbox(
-        "Ocultar o que ja chegou (pre nota)", key="ent_prenota",
-        help="Pre nota (laranja) = ja chegou na fabrica, falta so lancar a nota fiscal.",
-    )
+        "Ocultar o que ja chegou (pre nota)", key="ent_prenota", value=True,
+        help="Pre nota = ja chegou na fabrica, falta so lancar a nota fiscal.")
+
     p = pend.copy()
     if f_comp:
         p = p[p["comprador"].isin(f_comp)]
-    p = p[p["dias_em_aberto"] >= min_idade]
+    peds = _pedidos_pendentes(p)
+    emails_v = ent.vincular(peds, mails)
+    r = ent.resumo_por_pedido(peds, prev, emails_v, hoje=hoje)
     if forn_busca:
-        p = p[p["FORNECEDOR"].str.contains(forn_busca, case=False, na=False)]
+        alvo = r["FORNECEDOR"].astype(str) + " " + r["PEDIDO"].astype(str)
+        r = r[alvo.str.contains(forn_busca, case=False, na=False, regex=False)]
     if ocultar_prenota:
-        p = p[~p["chegou_fabrica"]]
-    p = p.sort_values("dias_em_aberto", ascending=False)
-
+        r = r[~r["chegou"]]
     ui.kpis([
-        {"rot": "Itens pendentes", "val": ui.num(len(p)), "cor": ui.LARANJA,
-         "sub": f"em <b>{ui.num(p['PEDIDO COMPRA'].nunique())}</b> pedidos"},
-        {"rot": "Ja chegaram (pre nota)", "val": ui.num(p["chegou_fabrica"].sum()),
-         "cor": ui.BOM, "sub": "falta lancar a nota"},
-        {"rot": "Aguardando chegada", "val": ui.num((~p["chegou_fabrica"]).sum()),
-         "cor": ui.AZUL, "sub": "com o fornecedor"},
-        {"rot": "Valor a receber", "cor": ui.AZUL_ESCURO,
-         "val": ui.brl_curto((p["saldo"] * p.get("PRECO.", 0)).sum()),
-         "sub": "saldo x preco unitario"},
+        {"rot": "Pedidos pendentes", "val": ui.num(len(r)), "cor": ui.AZUL,
+         "sub": f"<b>{ui.brl_curto(r['valor_saldo'].sum())}</b> a receber"},
+        {"rot": "Atrasados", "val": ui.num(r["atrasado"].sum()), "cor": ui.CRITICO,
+         "sub": "previsao ja passou"},
+        {"rot": "Vencem em 3 dias", "val": ui.num(r["vence_logo"].sum()), "cor": ui.LARANJA,
+         "sub": "previsao chegando"},
+        {"rot": "Sem retorno", "val": ui.num(r["sem_retorno"].sum()),
+         "cor": ui.AZUL_ESCURO, "sub": "sem e-mail nem previsao"},
     ])
+    if f_sit == "Atrasados":
+        r = r[r["atrasado"]]
+    elif f_sit == "Vencem em 3 dias":
+        r = r[r["vence_logo"]]
+    elif f_sit == "Sem retorno":
+        r = r[r["sem_retorno"]]
+    # atrasados primeiro, depois quem vence antes, depois os mais antigos
+    r = r.assign(_o=r["dias_para_previsao"].fillna(9999)).sort_values(
+        ["_o", "dias_em_aberto"], ascending=[True, False])
 
-    show = p[["PEDIDO COMPRA", "EMISSAO", "comprador", "FORNECEDOR", "PRODUTO",
-              "DESCRICAO.", "QUANTIDADE", "QUANT ENTREG", "saldo", "dias_em_aberto",
-              "situacao_label"]].copy()
-    show["EMISSAO"] = br_data(show["EMISSAO"])
-    show = show.rename(columns={"comprador": "COMPRADOR", "dias_em_aberto": "DIAS",
-                                "DESCRICAO.": "DESCRICAO", "situacao_label": "SITUACAO",
-                                "saldo": "SALDO"})
-    st.dataframe(show, width="stretch", hide_index=True, height=420,
-                 column_config={"DIAS": st.column_config.NumberColumn(format="%d d")})
-    baixar_csv(show, "entregas_pendentes.csv", "⬇️ Baixar entregas (CSV)")
+    if usuario is None:
+        ui.alerta("aviso", "👤", "Escolha seu nome na barra lateral",
+                  "Assim fica registrado quem alterou cada previsao.")
+    if mails.empty:
+        st.caption("✉️ Ainda nao ha e-mails ligados. Eles aparecem aqui quando a leitura "
+                   "automatica da caixa de entrada estiver rodando.")
 
-    e1, e2 = st.columns(2, gap="medium")
-    with e1, st.container(border=True):
-        ui.secao("Pendencias por comprador")
-        pc_c = p.groupby("comprador").size().sort_values()
-        fig = go.Figure(go.Bar(y=pc_c.index, x=pc_c.values, orientation="h",
-                               marker_color=ui.LARANJA, text=pc_c.values,
-                               textposition="outside", cliponaxis=False,
-                               textfont=dict(color=ui.TINTA_2),
-                               hovertemplate="%{y}: %{x} itens<extra></extra>"))
-        ui.estilo(fig, 280, legenda=False, horizontal=True)
-        fig.update_xaxes(visible=False, range=[0, max(pc_c.max() if len(pc_c) else 1, 1) * 1.2])
-        ui.grafico(fig)
-    with e2, st.container(border=True):
-        ui.secao("Pendencias por situacao")
-        pc_s = p.groupby("situacao_label").size().sort_values()
-        fig = go.Figure(go.Bar(y=pc_s.index, x=pc_s.values, orientation="h",
-                               marker_color=ui.AZUL, text=pc_s.values,
-                               textposition="outside", cliponaxis=False,
-                               textfont=dict(color=ui.TINTA_2),
-                               hovertemplate="%{y}: %{x} itens<extra></extra>"))
-        ui.estilo(fig, 280, legenda=False, horizontal=True)
-        fig.update_xaxes(visible=False, range=[0, max(pc_s.max() if len(pc_s) else 1, 1) * 1.2])
-        ui.grafico(fig)
+    ver_tabela = st.toggle("Ver itens como tabela (planilha)", key="ent_tabela")
+
+    def _f(d, fmt="%d/%m/%Y"):
+        return pd.Timestamp(d).strftime(fmt) if d is not None and pd.notna(d) else "-"
+
+    def _salvar_prev(pedido, anterior):
+        nova = st.session_state.get(f"prev_{pedido}")
+        obs = st.session_state.get(f"obs_{pedido}", "")
+        try:
+            ent.salvar_previsao(b_ent, pedido, nova, obs, usuario or "?", anterior)
+            st.toast("Previsao salva ✓", icon="💾")
+        except Exception as e:  # noqa: BLE001
+            st.toast(f"Erro ao salvar: {e}", icon="⚠️")
+
+    def cartao(x):
+        ped = x["PEDIDO"]
+        estado = ("ok" if x["chegou"] else "venc" if x["atrasado"] else
+                  "urg" if x["vence_logo"] else "normal")
+        with st.container(border=True, key=f"sc-{estado}-ped{ped}"):
+            c_info, c_acao = st.columns([7, 3], gap="medium")
+            bd = []
+            if x["chegou"]:
+                bd.append('<span class="bdg ok">✓ Chegou (pre nota)</span>')
+            elif x["algum_chegou"]:
+                bd.append('<span class="bdg ok">Parte ja chegou</span>')
+            if pd.notna(x["previsao"]):
+                fonte = ("e-mail · " + str(x["previsao_email_de"] or "")) \
+                    if x["previsao_fonte"] == "e-mail" else "manual"
+                bd.append(f'<span class="bdg local">📅 Previsao {_f(x["previsao"], "%d/%m")} · '
+                          f'{_html.escape(fonte)}</span>')
+            if x["atrasado"]:
+                bd.append(f'<span class="bdg venc">⏰ Atrasado {-int(x["dias_para_previsao"])} d</span>')
+            elif x["vence_logo"]:
+                d = int(x["dias_para_previsao"])
+                bd.append(f'<span class="bdg urg">{"Chega hoje" if d == 0 else f"Vence em {d} d"}</span>')
+            if x["sem_retorno"]:
+                bd.append('<span class="bdg reab">Sem retorno do fornecedor</span>')
+            if x["n_emails"]:
+                bd.append(f'<span class="bdg stt">✉️ {int(x["n_emails"])} e-mail(s)</span>')
+            linhas = "".join(
+                f'<div class="ped-it"><span class="sc-cod">{_html.escape(cod)}</span>'
+                f'{_html.escape(desc)} · <b>{qtd:g} {_html.escape(um)}</b>'
+                f'{" · chegou" if ch else ""}</div>'
+                for (_it, cod, desc, qtd, um, ch) in x["itens"][:6])
+            if len(x["itens"]) > 6:
+                linhas += f'<div class="ped-it">+ {len(x["itens"]) - 6} itens</div>'
+            transp = ""
+            if pd.notna(x.get("ult_situacao")) and x.get("ult_situacao"):
+                transp = (f'<div class="sc-meta"><span>🚚 {_html.escape(str(x["ult_situacao"]))}'
+                          "</span></div>")
+            c_info.markdown(
+                f'<div class="sc-card"><div class="sc-top"><span class="sc-num">PC '
+                f'{_html.escape(ped)}</span>{"".join(bd)}</div>'
+                f'<div class="sc-desc">{_html.escape(str(x["FORNECEDOR"]))}</div>'
+                f'{linhas}'
+                f'<div class="sc-meta"><span>Emissao <b>{_f(x["EMISSAO"])}</b> · '
+                f'{int(x["dias_em_aberto"])} dias em aberto</span>'
+                f'<span><b>{ui.brl(x["valor_saldo"])}</b> a receber</span>'
+                f'<span>👤 <b>{_html.escape(str(x["comprador"] or "-"))}</b></span></div>'
+                f"{transp}</div>", unsafe_allow_html=True)
+            k_prev, k_obs = f"prev_{ped}", f"obs_{ped}"
+            if k_prev not in st.session_state:
+                st.session_state[k_prev] = (pd.Timestamp(x["previsao"]).date()
+                                            if pd.notna(x["previsao"]) else None)
+            if k_obs not in st.session_state:
+                st.session_state[k_obs] = x["obs"] if pd.notna(x.get("obs")) and x.get("obs") else ""
+            c_acao.date_input("📅 Nova previsao", key=k_prev, format="DD/MM/YYYY")
+            c_acao.text_input("Observacao", key=k_obs, placeholder="ex.: fornecedor atrasou",
+                              label_visibility="collapsed")
+            c_acao.button("Salvar previsao", key=f"salv_{ped}", width="stretch",
+                          on_click=_salvar_prev, args=(ped, x["previsao"]))
+            ev = emails_v[emails_v["pedido_vinc"] == ped].sort_values(
+                "recebido_em", ascending=False) if not emails_v.empty else emails_v
+            lg = logs[logs["pedido"].map(ent.norm_pedido) == ped] if not logs.empty else logs
+            if len(ev) or len(lg):
+                with st.expander(f"✉️ E-mails ({len(ev)}) e historico da previsao ({len(lg)})"):
+                    for _, m in ev.iterrows():
+                        prev_t = (f" · <b>previsao {_f(m['previsao'], '%d/%m')}</b>"
+                                  if pd.notna(m["previsao"]) else "")
+                        como = {"nf": " · ligado pela NF", "fornecedor":
+                                " · ligado pelo nome do fornecedor"}.get(m["como"], "")
+                        link = (f' · <a href="{_html.escape(str(m["link"]))}" target="_blank">'
+                                "abrir no Outlook</a>") if m.get("link") else ""
+                        st.markdown(
+                            f'<div class="mail-it"><div class="mail-top">'
+                            f'{_f(m["recebido_em"], "%d/%m %H:%M")} · '
+                            f'<b>{_html.escape(str(m["remetente_nome"] or m["remetente"] or "-"))}</b>'
+                            f'{prev_t}{como}{link}</div>'
+                            f'<div class="mail-ass">{_html.escape(str(m["assunto"] or ""))}</div>'
+                            f'<div class="mail-res">{_html.escape(str(m["resumo"] or ""))}</div>'
+                            "</div>", unsafe_allow_html=True)
+                    for _, h in lg.sort_values("em", ascending=False).iterrows():
+                        st.caption(f"📅 {_f(h['em'], '%d/%m %H:%M')} · {h['usuario'] or '?'}: "
+                                   f"{_f(h['previsao_antiga'])} → {_f(h['previsao_nova'])}"
+                                   + (f" · {h['obs']}" if h.get("obs") else ""))
+
+    if ver_tabela:
+        mapa = r.set_index("PEDIDO")["previsao"]
+        p2 = p.assign(PEDIDO=p["PEDIDO COMPRA"].map(ent.norm_pedido))
+        p2 = p2[p2["PEDIDO"].isin(r["PEDIDO"])]
+        show = p2[["PEDIDO COMPRA", "EMISSAO", "comprador", "FORNECEDOR", "PRODUTO",
+                   "DESCRICAO.", "QUANTIDADE", "QUANT ENTREG", "saldo", "dias_em_aberto",
+                   "situacao_label"]].copy()
+        show.insert(2, "PREVISAO", br_data(p2["PEDIDO"].map(mapa)))
+        show["EMISSAO"] = br_data(show["EMISSAO"])
+        show = show.rename(columns={"comprador": "COMPRADOR", "dias_em_aberto": "DIAS",
+                                    "DESCRICAO.": "DESCRICAO", "PRODUTO": "COD. PRODUTO",
+                                    "situacao_label": "SITUACAO", "saldo": "SALDO"})
+        st.dataframe(show, width="stretch", hide_index=True, height=480,
+                     column_config={"DIAS": st.column_config.NumberColumn(format="%d d")})
+        baixar_csv(show, "entregas_pendentes.csv", "⬇️ Baixar entregas (CSV)")
+        return
+    if r.empty:
+        ui.alerta("ok", "✅", "Nenhum pedido neste filtro")
+        return
+    POR_PAG = 15
+    n_pag = max(1, -(-len(r) // POR_PAG))
+    assin = (tuple(f_comp), forn_busca, f_sit, ocultar_prenota, len(r))
+    if st.session_state.get("_ent_assin") != assin:
+        st.session_state["_ent_assin"] = assin
+        st.session_state["ent_pag"] = 1
+    pag = min(max(1, st.session_state.get("ent_pag", 1)), n_pag)
+    c1, c2, c3 = st.columns([2, 6, 2], vertical_alignment="center")
+    if c1.button("◀ Anterior", key="ent_ant", disabled=pag <= 1, width="stretch"):
+        st.session_state["ent_pag"] = pag - 1
+        st.rerun(scope="fragment")
+    c2.markdown(f"<div style='text-align:center;color:#52514e'>Pagina <b>{pag}</b> de "
+                f"<b>{n_pag}</b> · {len(r)} pedidos</div>", unsafe_allow_html=True)
+    if c3.button("Proxima ▶", key="ent_prox", disabled=pag >= n_pag, width="stretch",
+                 type="primary"):
+        st.session_state["ent_pag"] = pag + 1
+        st.rerun(scope="fragment")
+    for _, x in r.iloc[(pag - 1) * POR_PAG: pag * POR_PAG].iterrows():
+        cartao(x)
 
 
 if tab4.open:
