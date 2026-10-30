@@ -46,7 +46,7 @@ def _demo() -> dict:
 
 # Mudou a regra de leitura/cruzamento? Troque a versao: invalida o cache antigo
 # (o cache do Streamlit so enxerga o codigo da propria funcao, nao o de src/).
-VERSAO_MOTOR = "2026-10-26b"
+VERSAO_MOTOR = "2026-10-30a"
 
 
 @st.cache_data(show_spinner="Identificando os arquivos...", max_entries=5)
@@ -757,14 +757,28 @@ def _aba_backlog():
     backlog = mf_base[~mf_base["com_pedido"]].merge(
         acomp_f[COLS_ACOMP], on="chave", how="left")
     backlog["atendida"] = backlog["atendida"].fillna(False).astype(bool)
-    locais = sorted(acomp_f["onde_encontrar"].dropna().unique().tolist())
+    # so os locais das SCs que ainda estao na lista (sem pedido); nomes de SCs que
+    # ja sairam nao aparecem mais
+    locais = sorted(backlog["onde_encontrar"].dropna().unique().tolist())
     status_opts = st_store.STATUS_PADRAO + sorted(
         set(acomp_f["andamento"].dropna().unique()) - set(st_store.STATUS_PADRAO))
 
     f1, f2, f3, f3b = st.columns([3, 3, 3, 3])
     resp_opts = sorted([r for r in backlog["responsavel"].dropna().unique()])
     f_resp = f1.multiselect("Responsavel", resp_opts, key="bl_resp", placeholder="Todos")
-    f_onde = f2.multiselect("Onde encontrar", ["(nao definido)"] + locais,
+    # no filtro, so os locais da situacao escolhida (Pendentes por padrao)
+    _sit = st.session_state.get("bl_sit2", "Pendentes") or "Pendentes"
+    _bf = backlog[backlog["responsavel"].isin(st.session_state.get("bl_resp") or
+                                              backlog["responsavel"].unique())]
+    if _sit == "Pendentes":
+        _bf = _bf[~_bf["atendida"]]
+    elif _sit == "Atendidas":
+        _bf = _bf[_bf["atendida"]]
+    elif _sit == "Desfeitas":
+        _bf = _bf[(~_bf["atendida"]) & _bf["reaberta_em"].notna()]
+    locais_filtro = sorted(set(_bf["onde_encontrar"].dropna())
+                           | set(st.session_state.get("bl_onde") or []) - {"(nao definido)"})
+    f_onde = f2.multiselect("Onde encontrar", ["(nao definido)"] + locais_filtro,
                             key="bl_onde", placeholder="Todos os locais")
     f_status = f3.multiselect("Status", ["(sem status)"] + status_opts, key="bl_status",
                               placeholder="Todos os status")
